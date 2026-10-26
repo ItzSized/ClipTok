@@ -1,0 +1,21 @@
+{
+  "name": "cliptok",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "npm run install:backend && npm run install:frontend && npm run install:python",
+    "install:backend": "npm install --prefix backend",
+    "install:frontend": "npm install --prefix frontend",
+    "install:python": "pip install -r backend/requirements.txt",
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "dev": "concurrently -n api,web -c magenta,cyan \"npm run dev:backend\" \"node scripts/serve-frontend.js\"",
+    "build": "npm run build --prefix frontend",
+    "start": "concurrently -n api,web -c magenta,cyan \"npm start --prefix backend\" \"npm start --prefix frontend\"",
+    "prod": "npm run build && npm start",
+    "dev:hot": "concurrently -n api,web,warmup -c magenta,cyan,gray \"npm run dev:backend\" \"npm run dev:frontend\" \"node scripts/warmup.js\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
