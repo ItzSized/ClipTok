@@ -36,6 +36,8 @@ function originalName(file) {
 }
 
 router.get('/', async (req, res) => {
+  // Sons déposés à la main dans la bibliothèque (D:\…\Bibliotheque) : ajoutés automatiquement.
+  await media.scanLibrary().catch((err) => console.warn('[bibliothèque]', err.message));
   const list = await db.listDocs('media');
   res.json(list.map(media.summarize));
 });
@@ -45,7 +47,7 @@ router.post('/upload', upload.array('files', 30), async (req, res) => {
   const errors = [];
   for (const file of req.files || []) {
     try {
-      created.push(media.summarize(await media.registerFile(file.path, { name: originalName(file), mimetype: file.mimetype, size: file.size })));
+      created.push(media.summarize(await media.registerFile(file.path, { name: originalName(file), mimetype: file.mimetype, size: file.size, toLibrary: true })));
     } catch (err) {
       errors.push({ name: originalName(file), error: err.message.split('\n')[0] });
       await fs.unlink(file.path).catch(() => { });

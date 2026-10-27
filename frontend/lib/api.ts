@@ -8,6 +8,7 @@ import type {
   Media,
   FontInfo,
   SfxItem,
+  Voice,
   CaptionProject,
   EditorProjectSummary,
   EditorProjectDoc,
@@ -41,10 +42,23 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     if (token) headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers: { ...headers, ...(options.headers as Record<string, string> | undefined) },
-  });
+  // « Failed to fetch » = serveur injoignable (redémarrage de nodemon, coupure) : quelques nouvelles tentatives.
+  let res: Response | undefined;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await fetch(`${API_BASE_URL}${path}`, {
+        ...options,
+        headers: { ...headers, ...(options.headers as Record<string, string> | undefined) },
+      });
+      break;
+    } catch (err: any) {
+      if (options.signal?.aborted || err?.name === 'AbortError') throw err;
+      if (attempt >= 3) {
+        throw new ApiError(`Serveur injoignable (${API_BASE_URL}). Vérifiez que le backend tourne (npm run dev) puis réessayez.`, 0);
+      }
+      await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+    }
+  }
   const data = await parseJsonSafe(res);
   if (!res.ok) {
     throw new ApiError(data?.error || `Erreur ${res.status}`, res.status);
@@ -153,8 +167,10 @@ export async function uploadCookies(cookiesText: string): Promise<{ success: tru
 export function subscribeToJob(jobId: string, onEvent: (event: SSEEvent) => void): () => void {
   const sse = new EventSource(`${API_BASE_URL}/api/jobs/${jobId}/events`);
   let finished = false;
+  let failures = 0;
 
   sse.onmessage = (event) => {
+    failures = 0;
     try {
       const payload = JSON.parse(event.data);
       if (payload.type === 'done' || payload.type === 'error') finished = true;
@@ -166,6 +182,9 @@ export function subscribeToJob(jobId: string, onEvent: (event: SSEEvent) => void
   };
 
   sse.onerror = () => {
+    // Micro-coupure : EventSource se reconnecte tout seul, on n'abandonne qu'après plusieurs échecs.
+    failures += 1;
+    if (!finished && sse.readyState !== EventSource.CLOSED && failures < 4) return;
     sse.close();
     if (!finished) onEvent({ type: 'error', data: { error: 'Connexion au serveur perdue ou tâche introuvable.' } });
   };
@@ -207,6 +226,26 @@ export function getFonts(): Promise<FontInfo[]> {
 
 export function getSfx(): Promise<SfxItem[]> {
   return request('/api/sfx');
+}
+
+// --- VOIX OFF ---
+
+export function getVoices(): Promise<Voice[]> {
+  return request('/api/tts/voices');
+}
+
+export function voicePreviewUrl(id: string): string {
+  return `${API_BASE_URL}/api/tts/voices/${encodeURIComponent(id)}/preview`;
+}
+
+/** Génère une voix off (rangée dans la bibliothèque Voix) et renvoie le média créé. */
+export function generateVoice(body: { text: string; voice: string; rate?: number; pitch?: number }): Promise<Media> {
+  return request('/api/tts', { method: 'POST', body: JSON.stringify(body) });
+}
+
+/** Visuel trouvé sur internet (capture d'un site, image, extrait YouTube) ajouté aux médias. */
+export function fetchWebMedia(body: { query: string; kind: 'screenshot' | 'image' | 'video'; url?: string; start?: number; duration?: number }, signal?: AbortSignal): Promise<Media> {
+  return request('/api/ai/web-media', { method: 'POST', body: JSON.stringify(body), signal });
 }
 
 // --- MÉDIAS ---
@@ -427,7 +466,17 @@ export interface AiEditResponse {
 }
 
 export function aiEdit(
-  body: { request: string; history: { role: 'user' | 'assistant'; content: string }[]; context: unknown; provider?: string; model?: string; mode?: AiMode; webSearch?: boolean },
+  body: {
+    request: string;
+    history: { role: 'user' | 'assistant'; content: string }[];
+    context: unknown;
+    provider?: string;
+    model?: string;
+    mode?: AiMode;
+    webSearch?: boolean;
+    /** Mode automatique : IA qui a répondu au message précédent (gardée toute la discussion). */
+    sticky?: { provider: string; model: string };
+  },
   signal?: AbortSignal
 ): Promise<AiEditResponse> {
   return request('/api/ai/edit', { method: 'POST', ...json(body), signal });

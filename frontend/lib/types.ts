@@ -94,6 +94,19 @@ export interface Media {
   translated?: boolean;
   /** Ce que l'IA voit dans le média (B-roll automatique). */
   vision?: { description: string; tags: string[]; text?: string; model?: string } | null;
+  /** Dossier de la bibliothèque audio (sur D:) : musique, son court ou voix off générée. */
+  library?: 'music' | 'sfx' | 'voice' | null;
+  /** Voix off générée : voix et texte d'origine. */
+  tts?: { voice: string; text: string; rate: number; pitch: number } | null;
+}
+
+export interface Voice {
+  id: string;
+  name: string;
+  desc: string;
+  lang: string;
+  gender: 'male' | 'female';
+  provider: 'edge' | 'elevenlabs';
 }
 
 export interface FontInfo {

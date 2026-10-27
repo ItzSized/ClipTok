@@ -172,7 +172,7 @@ function buildLayer(g, clip, ctx, rasters) {
     const srcPath = resolvePublicPath(clip.src);
     if (!srcPath) throw new Error(`Média introuvable pour le clip "${clip.name}".`);
     const srcDur = dur * speed;
-    const idx = g.addInput(['-ss', num(clip.trimStart || 0), '-t', num(srcDur + 0.5), '-i', srcPath]);
+    const idx = g.addInput(['-threads', '2', '-ss', num(clip.trimStart || 0), '-t', num(srcDur + 0.5), '-i', srcPath]);
     clip._inputIndex = idx;
     srcLabel = g.label('src');
     g.push(`[${idx}:v]setpts=(PTS-STARTPTS)/${num(speed)},fps=${fps},trim=duration=${num(dur)},setpts=PTS-STARTPTS[${srcLabel}]`);
@@ -205,42 +205,27 @@ function buildLayer(g, clip, ctx, rasters) {
   const scaleAnimated = animated.scale;
   const rotationAnimated = animated.rotation;
   const staticState = states[0];
+  const hasRotation = rotationAnimated || Math.abs(staticState.rotation) > 0.01;
+  const hasChroma = Boolean(clip.chromaKey && clip.chromaKey.enabled);
+  const needsRgba = alpha || hasChroma || hasRotation || scaleAnimated || animated.opacity || staticState.opacity < 0.999;
 
   // Les très gros zooms sont plafonnés (évite des images gigantesques en mémoire).
-  const preScale = scaleAnimated ? Math.min(maxScale, 4) : Math.max(0.01, staticState.scale);
+  const preScale = scaleAnimated ? Math.min(maxScale, 3) : Math.max(0.01, staticState.scale);
   const preW = even(baseW * preScale);
   const preH = even(baseH * preScale);
-  filters.push(`scale=${preW}:${preH}:flags=lanczos`);
+  filters.push(`scale=${preW}:${preH}:flags=bicubic`);
 
   if (clip.transform && clip.transform.flipH) filters.push('hflip');
   if (clip.transform && clip.transform.flipV) filters.push('vflip');
 
-  if (clip.chromaKey && clip.chromaKey.enabled) {
+  if (hasChroma) {
     filters.push('format=rgba', `colorkey=color=${hexColor(clip.chromaKey.color)}:similarity=${num(Math.max(0.01, clip.chromaKey.similarity))}:blend=${num(clip.chromaKey.blend || 0)}`);
   }
-  if (clip.type === 'video' || clip.type === 'image') filters.push(...pixelEffectFilters(clip, R, alpha || (clip.chromaKey && clip.chromaKey.enabled)));
+  if (clip.type === 'video' || clip.type === 'image') filters.push(...pixelEffectFilters(clip, R, alpha || hasChroma));
   filters.push(...colorFilters(clip));
-  filters.push('format=rgba');
-
-  let boxed = false;
-  if (scaleAnimated || rotationAnimated) {
-    // Boîte fixe (diagonale de la taille maximale) : la taille de l'image ne
-    // change jamais, la rotation ne coupe pas les coins.
-    const box = even(Math.hypot(preW, preH) + 4);
-    if (scaleAnimated) {
-      const ratio = `(${exprs.scale})/${num(preScale)}`;
-      filters.push(`scale=w='max(2,trunc(iw*${ratio}/2)*2)':h='max(2,trunc(ih*${ratio}/2)*2)':eval=frame`);
-    }
-    filters.push(`pad=w=${box}:h=${box}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0${scaleAnimated ? ':eval=frame' : ''}`);
-    filters.push(`rotate=a='(${exprs.rotation})*PI/180':c=none:ow=${box}:oh=${box}`);
-    boxed = true;
-  } else if (Math.abs(staticState.rotation) > 0.01) {
-    const a = `${num(staticState.rotation)}*PI/180`;
-    filters.push(`rotate=a=${a}:c=none:ow='rotw(${a})':oh='roth(${a})'`);
-  }
+  if (needsRgba) filters.push('format=rgba');
 
   if (animated.opacity) {
-    // Opacité animée : commandes envoyées à colorchannelmixer à chaque image (bien plus rapide que geq).
     const opId = g.label('op');
     const lines = [];
     let last = null;
@@ -253,6 +238,33 @@ function buildLayer(g, clip, ctx, rasters) {
     filters.push(`sendcmd=f=${filterPath(name)}`, `colorchannelmixer@${opId}=aa=${states[0].opacity}`);
   } else if (staticState.opacity < 0.999) {
     filters.push(`colorchannelmixer=aa=${num(staticState.opacity)}`);
+  }
+
+  let boxed = false;
+  if (rotationAnimated) {
+    const box = even(Math.hypot(preW, preH) + 4);
+    if (scaleAnimated) {
+      const ratio = `min(1,(${exprs.scale})/${num(preScale)})`; // jamais plus grand que la boîte (zooms > x3 plafonnés)
+      filters.push(`scale=w='max(2,trunc(iw*${ratio}/2)*2)':h='max(2,trunc(ih*${ratio}/2)*2)':flags=fast_bilinear:eval=frame`);
+    }
+    filters.push(`pad=w=${box}:h=${box}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0${scaleAnimated ? ':eval=frame' : ''}`);
+    filters.push(`rotate=a='(${exprs.rotation})*PI/180':c=none:ow=${box}:oh=${box}`);
+    boxed = true;
+  } else if (scaleAnimated) {
+    const ratio = `min(1,(${exprs.scale})/${num(preScale)})`; // jamais plus grand que la boîte (zooms > x3 plafonnés)
+    filters.push(`scale=w='max(2,trunc(iw*${ratio}/2)*2)':h='max(2,trunc(ih*${ratio}/2)*2)':flags=fast_bilinear:eval=frame`);
+    if (Math.abs(staticState.rotation) > 0.01) {
+      const box = even(Math.hypot(preW, preH) + 4);
+      const a = `${num(staticState.rotation)}*PI/180`;
+      filters.push(`pad=w=${box}:h=${box}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0:eval=frame`);
+      filters.push(`rotate=a=${a}:c=none:ow=${box}:oh=${box}`);
+    } else {
+      filters.push(`pad=w=${preW}:h=${preH}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0:eval=frame`);
+    }
+    boxed = true;
+  } else if (Math.abs(staticState.rotation) > 0.01) {
+    const a = `${num(staticState.rotation)}*PI/180`;
+    filters.push(`rotate=a=${a}:c=none:ow='rotw(${a})':oh='roth(${a})'`);
   }
 
   // Assemblage : les marqueurs { mirror } coupent la chaîne en sous-graphes.
@@ -279,7 +291,8 @@ function buildLayer(g, clip, ctx, rasters) {
   if (pending.length === 0) pending.push('null');
   const out = g.label('lay');
   g.push(`[${current}]${pending.join(',')}[${out}]`);
-  return { label: out, exprs, boxed };
+  const isSimpleStatic = !needsRgba && !animated.x && !animated.y && Math.abs(staticState.x - 0.5) < 0.001 && Math.abs(staticState.y - 0.5) < 0.001;
+  return { label: out, exprs, animated, preW, preH, isSimpleStatic, boxed };
 }
 
 /** Superpose un calque sur `baseLabel`. T est l'expression du temps local du clip. */
@@ -290,7 +303,8 @@ function overlayLayer(g, baseLabel, layer, clip, ctx, T, enable) {
   const y = `(${sub(layer.exprs.y)})*${H}-h/2`;
   const out = g.label('ov');
   const en = enable ? `:enable='${enable}'` : '';
-  g.push(`[${baseLabel}][${layer.label}]overlay=x='${x}':y='${y}'${en}:eof_action=pass:eval=frame[${out}]`);
+  const evalMode = layer.animated && (layer.animated.x || layer.animated.y) ? ':eval=frame' : ':eval=init';
+  g.push(`[${baseLabel}][${layer.label}]overlay=x='${x}':y='${y}'${en}:eof_action=pass${evalMode}[${out}]`);
   return out;
 }
 
@@ -299,11 +313,28 @@ function buildMainSegment(g, clip, ctx, rasters, project) {
   const { W, H, fps } = ctx;
   const bg = project.settings.background || { type: 'color', color: '#000000' };
   const layer = buildLayer(g, clip, ctx, rasters);
+
+  if (bg.type !== 'blur' && layer.isSimpleStatic) {
+    const seg = g.label('seg');
+    const geom = [];
+    if (layer.preW > W || layer.preH > H) {
+      const cw = Math.min(W, layer.preW);
+      const ch = Math.min(H, layer.preH);
+      geom.push(`crop=${cw}:${ch}:(iw-${cw})/2:(ih-${ch})/2`);
+    }
+    if (layer.preW < W || layer.preH < H) {
+      geom.push(`pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=${hexColor(bg.color)}`);
+    }
+    geom.push(`trim=duration=${num(clip.duration)}`, 'format=yuv420p', 'setsar=1', 'settb=AVTB', 'setpts=PTS-STARTPTS');
+    g.push(`[${layer.label}]${geom.join(',')}[${seg}]`);
+    return seg;
+  }
+
   let bgLabel = g.label('bg');
   if (bg.type === 'blur' && clip.type === 'video' && clip._inputIndex !== undefined) {
     const speed = clip.speed || 1;
     g.push(
-      `[${clip._inputIndex}:v]setpts=(PTS-STARTPTS)/${num(speed)},fps=${fps},trim=duration=${num(clip.duration)},setpts=PTS-STARTPTS,scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},gblur=sigma=${num(Math.max(W, H) / 40)},eq=brightness=-0.08,format=yuv420p[${bgLabel}]`
+      `[${clip._inputIndex}:v]setpts=(PTS-STARTPTS)/${num(speed)},fps=${fps},trim=duration=${num(clip.duration)},setpts=PTS-STARTPTS,scale=${W}:${H}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${W}:${H},gblur=sigma=${num(Math.max(W, H) / 40)},eq=brightness=-0.08,format=yuv420p[${bgLabel}]`
     );
   } else {
     g.push(`color=c=${hexColor(bg.color)}:s=${W}x${H}:r=${fps}:d=${num(clip.duration)},format=yuv420p[${bgLabel}]`);

@@ -16,7 +16,12 @@ interface Props {
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 
 /** Aperçu miniature d'un modèle (police réelle + couleur de surlignage). */
-function PresetCard({ preset, active, onClick }: { preset: engine.CaptionPreset; active: boolean; onClick: () => void }) {
+const rgba = (hex: string, a: number) => {
+  const h = (hex || '#000000').replace('#', '').padEnd(6, '0');
+  return `rgba(${parseInt(h.slice(0, 2), 16)},${parseInt(h.slice(2, 4), 16)},${parseInt(h.slice(4, 6), 16)},${a})`;
+};
+
+export function PresetCard({ preset, active, onClick }: { preset: engine.CaptionPreset; active: boolean; onClick: () => void }) {
   const s = engine.resolveStyle({ ...preset.style, preset: preset.id });
   const sample = s.uppercase ? 'LE MOT CLÉ' : 'Le mot clé';
   const [first, ...rest] = sample.split(' ');
@@ -39,7 +44,7 @@ function PresetCard({ preset, active, onClick }: { preset: engine.CaptionPreset;
           WebkitTextStroke: stroke,
           paintOrder: 'stroke fill',
           textShadow: s.shadowOpacity > 0 && s.shadowDepth > 0 ? `2px 2px 0 rgba(0,0,0,${s.shadowOpacity})` : s.glow ? `0 0 8px ${s.outlineColor}` : undefined,
-          background: s.background === 'box' ? `rgba(0,0,0,${s.backgroundOpacity})` : undefined,
+          background: s.background === 'box' ? rgba(s.backgroundColor, s.backgroundOpacity) : undefined,
           padding: s.background === 'box' ? '2px 4px' : undefined,
         }}
       >

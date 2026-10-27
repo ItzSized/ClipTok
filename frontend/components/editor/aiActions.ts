@@ -15,7 +15,8 @@ import * as core from '@shared/editorCore';
 import * as captionEngine from '@shared/captionEngine';
 import type { Clip, EditorProject, Track } from '@shared/editorCore';
 import type { Media, SfxItem } from '@/lib/types';
-import { aiBroll, describeMedia, listMedia, type AiMemory, type AiMode } from '@/lib/api';
+import { aiBroll, describeMedia, fetchWebMedia, generateVoice, listMedia, type AiMemory, type AiMode } from '@/lib/api';
+import { getVoicePrefs } from '@/components/media/VoiceOver';
 import type { EditorStore } from './store';
 import type { PreviewEngine } from '@/lib/editor/engine';
 import { generateTimelineCaptions, cutSilences, ensureTranscripts, speechClips, timelineWords, type Progress } from './timelineSpeech';
@@ -42,6 +43,8 @@ function roleOf(project: EditorProject, track: Track): TrackRole {
 
 export function buildAiContext(store: EditorStore, engine: PreviewEngine, media: Media[], sfx: SfxItem[], selectedMediaIds: string[] = [], memory: AiMemory[] = []) {
   const p = store.getState().project;
+  // Du plus ancien au plus récent : un nouvel import ne décale plus les numéros mX déjà cités dans la discussion.
+  media = [...media].sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
   const aliases: AiAliases = { clips: new Map(), media: new Map(), mediaById: new Map(), memory: new Map(), memoryAudio: [] };
   const mediaAlias = aliases.mediaById;
   media.forEach((m, i) => {
@@ -66,7 +69,8 @@ export function buildAiContext(store: EditorStore, engine: PreviewEngine, media:
 
   const clips = ordered.map((c) => {
     const track = p.tracks.find((t) => t.id === c.trackId)!;
-    const base: Record<string, unknown> = { id: clipAlias.get(c.id), type: c.type, track: roleOf(p, track), start: r2(c.start), duration: r2(c.duration) };
+    const base: Record<string, unknown> = { id: clipAlias.get(c.id), type: c.type, track: roleOf(p, track), start: r2(c.start), end: r2(c.start + c.duration), duration: r2(c.duration) };
+    if (c.name && (c.type === 'video' || c.type === 'audio' || c.type === 'image')) base.name = c.name.slice(0, 60);
     if (c.mediaId && mediaAlias.has(c.mediaId)) base.media = mediaAlias.get(c.mediaId);
     if (c.type === 'video' || c.type === 'audio') {
       base.trim_start = r2(c.trimStart || 0);
@@ -75,9 +79,19 @@ export function buildAiContext(store: EditorStore, engine: PreviewEngine, media:
       if (c.muted) base.muted = true;
     }
     if (c.src?.startsWith('/sfx/')) base.sfx = c.src.replace('/sfx/', '').replace('.mp3', '');
-    if (c.type === 'text') base.text = c.text;
+    // Voix de synthèse ajoutée par l'IA (≠ la voix d'origine des vidéos).
+    if (c.mediaId && byId.get(c.mediaId)?.source === 'tts') base.generated_voice = true;
+    if (c.type === 'text') {
+      base.text = c.text;
+      // Style actuel : l'IA peut alors « mettre en rouge », « agrandir »… le bon texte.
+      if (c.textStyle) Object.assign(base, { color: c.textStyle.color, size: r2(c.textStyle.fontSize * 1000) / 1000 });
+    }
     if (c.type === 'sticker') base.emoji = c.emoji;
-    if (c.type === 'caption') base.words = (c.words || []).length;
+    if (c.type === 'caption') {
+      base.words = (c.words || []).length;
+      const st = captionEngine.resolveStyle(c.captionStyle || {});
+      Object.assign(base, { preset: st.preset, color: st.textColor, highlight: st.highlightColors[0], position: st.positionY < 0.35 ? 'top' : st.positionY > 0.6 ? 'bottom' : 'center' });
+    }
     if (c.filter && c.filter.id !== 'none') base.filter = c.filter.id;
     if (c.effects?.length) base.effects = c.effects.map((e) => e.id);
     if (c.animIn) base.anim_in = c.animIn.type;
@@ -110,11 +124,14 @@ export function buildAiContext(store: EditorStore, engine: PreviewEngine, media:
       kind: m.kind,
       duration: r2(m.duration),
       ...(m.kind !== 'audio' ? { size: `${m.width}x${m.height}` } : {}),
+      ...(m.library ? { folder: m.library } : {}),
       ...(m.transcript ? { transcribed: true, words: m.transcript.wordCount } : {}),
       ...(m.vision ? { desc: m.vision.description.slice(0, 140), tags: m.vision.tags.slice(0, 8).join(', ') } : {}),
     })),
     selectedMedia: selectedMediaIds.map((id) => mediaAlias.get(id)).filter(Boolean),
     sfx: sfx.map((s) => s.id),
+    // Voix choisie par l'utilisateur pour les voix off (action "voiceover").
+    voice: getVoicePrefs().voice,
     // Souvenirs de l'utilisateur (préférences, ses sons…) avec leurs médias en alias courts actuels + noms.
     memory: memory.map((k, i) => {
       aliases.memory.set(`k${i + 1}`, k.id);
@@ -336,7 +353,7 @@ export async function applyAiActions(
               });
               break;
             }
-            const isShortSound = m.kind === 'audio' && m.duration > 0 && m.duration <= 8;
+            const isShortSound = m.kind === 'audio' && (m.library === 'sfx' || (!m.library && m.source !== 'tts' && m.duration > 0 && m.duration <= 8));
             const role: TrackRole =
               a.track === 'sfx'
                 ? 'sfx'
@@ -646,6 +663,61 @@ export async function applyAiActions(
               applyTheme(store, a.theme, sfx, { sfx: a.sfx !== false });
             });
             done.push(`Thème « ${core.THEMES.find((t) => t.id === a.theme)!.name} »`);
+            break;
+          }
+          case 'voiceover': {
+            const text = typeof a.text === 'string' ? a.text.trim() : '';
+            if (!text) throw new Error('texte de la voix off manquant');
+            const prefs = getVoicePrefs();
+            const at = timeOf(a.at, 0);
+            // Généré avant les autres tâches longues : les sous-titres et le B-roll du même plan la prennent en compte.
+            deferred.unshift(async () => {
+              onProgress?.('Génération de la voix off…', 0);
+              const m = await generateVoice({
+                text,
+                voice: typeof a.voice === 'string' && a.voice ? a.voice : prefs.voice,
+                rate: num(a.speed) ?? prefs.rate,
+                pitch: num(a.pitch) ?? prefs.pitch,
+              });
+              store.update((p) => {
+                const track = trackFor(p, 'audio', at, at + m.duration);
+                const clip = core.createMediaClip(mediaLike(m), track.id, at);
+                clip.volume = clampN(num(a.volume, 1)!, 0, 2);
+                p.clips.push(clip);
+              });
+              if (a.ref) {
+                const added = project().clips.filter((c) => c.mediaId === m.id).pop();
+                if (added) refs.set(String(a.ref), added.id);
+              }
+              done.push(`Voix off « ${m.name.replace(/\.mp3$/, '')} » (${r2(m.duration)} s)`);
+            });
+            break;
+          }
+          case 'web_media': {
+            const query = String(a.query ?? '').trim();
+            const url = typeof a.url === 'string' ? a.url : undefined;
+            if (!query && !url) throw new Error('recherche manquante');
+            const kind = a.kind === 'video' || a.kind === 'screenshot' ? a.kind : 'image';
+            const role: TrackRole = a.track === 'main' ? 'main' : 'overlay';
+            const at = timeOf(a.at, engine.time);
+            deferred.push(async () => {
+              onProgress?.(kind === 'video' ? `Téléchargement d'un extrait : ${query || url}…` : kind === 'screenshot' ? `Capture du site : ${query || url}…` : `Recherche d'image : ${query}…`, 0);
+              const m = await fetchWebMedia({ query, kind, url, start: num(a.clip_start), duration: num(a.clip_length) });
+              let id = '';
+              store.update((p) => {
+                const shown = m.kind === 'image' ? clampN(num(a.duration, 4)!, 0.5, 60) : Math.min(m.duration || 5, num(a.duration) ?? m.duration ?? 5);
+                const track = trackFor(p, role, at, at + shown);
+                const clip = core.createMediaClip(mediaLike(m), track.id, 0);
+                clip.duration = m.kind === 'image' ? shown : clampN(shown, 0.1, core.maxClipDuration(clip));
+                // Piste principale : ajouté à la fin ; incrustation : à la tête de lecture (ou "at").
+                clip.start = track.main ? core.projectDuration(p) + 1 : at;
+                if (!track.main && m.kind === 'video') clip.volume = 0;
+                p.clips.push(clip);
+                id = clip.id;
+              });
+              if (a.ref && id) refs.set(String(a.ref), id);
+              done.push(`${kind === 'video' ? 'Extrait vidéo' : kind === 'screenshot' ? 'Capture' : 'Image'} du web : « ${m.name} »`);
+            });
             break;
           }
           case 'broll': {

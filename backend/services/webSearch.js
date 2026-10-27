@@ -55,4 +55,4 @@ async function webSearch(query, signal) {
   return { query: q, ...(await duckDuckGo(q, signal)) };
 }
 
-module.exports = { webSearch };
+module.exports = { webSearch, duckDuckGo };

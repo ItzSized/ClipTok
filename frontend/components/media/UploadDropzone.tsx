@@ -23,6 +23,7 @@ export default function UploadDropzone({ accept = 'video/*,audio/*,image/*', mul
   const [dragging, setDragging] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [info, setInfo] = useState<UploadInfo | null>(null);
+  const activeBatches = useRef(0);
   const { showToast } = useToast();
 
   // `webkitdirectory` n'est pas typé par React : posé directement sur l'élément.
@@ -37,8 +38,12 @@ export default function UploadDropzone({ accept = 'video/*,audio/*,image/*', mul
       if (Array.from(list).length) showToast({ type: 'error', message: 'Aucune vidéo, image ou son trouvé.' });
       return;
     }
-    setProgress(0);
-    setInfo(null);
+    // Un envoi déjà en cours : les nouveaux fichiers rejoignent la file (progression commune).
+    activeBatches.current += 1;
+    if (activeBatches.current === 1) {
+      setProgress(0);
+      setInfo(null);
+    }
     try {
       // Chaque fichier est transmis dès qu'il est prêt (il apparaît tout de suite dans la liste).
       const { media, errors } = await uploadMany(
@@ -54,16 +59,24 @@ export default function UploadDropzone({ accept = 'video/*,audio/*,image/*', mul
     } catch (err: any) {
       showToast({ type: 'error', message: err.message || "Échec de l'envoi." });
     } finally {
-      setProgress(null);
-      setInfo(null);
-      if (inputRef.current) inputRef.current.value = '';
-      if (folderRef.current) folderRef.current.value = '';
+      activeBatches.current -= 1;
+      if (activeBatches.current === 0) {
+        setProgress(null);
+        setInfo(null);
+      }
     }
+  };
+
+  /** Fichiers choisis : copiés puis le champ est vidé tout de suite (on peut re-choisir pendant l'envoi). */
+  const pick = (input: HTMLInputElement) => {
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (files.length) send(files);
   };
 
   return (
     <div
-      onClick={() => progress === null && inputRef.current?.click()}
+      onClick={() => inputRef.current?.click()}
       onDragOver={(e) => {
         e.preventDefault();
         setDragging(true);
@@ -73,14 +86,14 @@ export default function UploadDropzone({ accept = 'video/*,audio/*,image/*', mul
         e.preventDefault();
         e.stopPropagation();
         setDragging(false);
-        if (progress === null) send(await filesFromDrop(e.dataTransfer));
+        send(await filesFromDrop(e.dataTransfer));
       }}
       className={`border-2 border-dashed rounded-2xl flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
         compact ? 'p-4 gap-1' : 'p-10 gap-2'
       } ${dragging ? 'border-fuchsia-500 bg-fuchsia-500/10 scale-[1.01]' : 'border-white/15 bg-black/20 hover:bg-white/5 hover:border-white/30'}`}
     >
-      <input ref={inputRef} type="file" accept={accept} multiple={multiple} className="hidden" onChange={(e) => e.target.files && send(e.target.files)} />
-      <input ref={folderRef} type="file" multiple className="hidden" onChange={(e) => e.target.files && send(e.target.files)} />
+      <input ref={inputRef} type="file" accept={accept} multiple={multiple} className="hidden" onChange={(e) => pick(e.target)} />
+      <input ref={folderRef} type="file" multiple className="hidden" onChange={(e) => pick(e.target)} />
       {progress !== null ? (
         <>
           <Loader2 className={`${compact ? 'w-5 h-5' : 'w-8 h-8'} text-fuchsia-400 animate-spin`} />
@@ -94,6 +107,7 @@ export default function UploadDropzone({ accept = 'video/*,audio/*,image/*', mul
               {info.current[0] && <p className={`text-zinc-500 truncate max-w-full ${compact ? 'text-[9px]' : 'text-[11px]'}`} title={info.current.join(', ')}>{info.current[0]}</p>}
             </>
           )}
+          {multiple && <p className={`text-fuchsia-300/70 ${compact ? 'text-[9px]' : 'text-[11px]'}`}>+ cliquez ou déposez pour en ajouter</p>}
         </>
       ) : (
         <>

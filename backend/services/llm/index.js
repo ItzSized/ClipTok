@@ -90,4 +90,10 @@ async function listModels(providerId) {
   }
 }
 
-module.exports = { generateJson, listProviders, hasProvider, listModels };
+/** Ce modèle est-il le « petit » modèle rapide du fournisseur (à ne pas garder pour toute une discussion) ? */
+function isFastModel(providerId, model) {
+  const p = PROVIDERS[providerId];
+  return Boolean(p && model && p.model('fast') === model && p.model('smart') !== model);
+}
+
+module.exports = { generateJson, listProviders, hasProvider, listModels, isFastModel };

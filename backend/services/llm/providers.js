@@ -68,6 +68,21 @@ const GEMINI_TIERS = {
 const GEMINI_FALLBACKS = ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-flash-lite-latest', 'gemini-3.8-flash'];
 const DEFAULT_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS) || 60000;
 
+// Attente maximale quand un fournisseur demande de patienter (limite de requêtes / jetons par minute).
+const MAX_RATE_WAIT_S = Number(process.env.AI_MAX_RATE_WAIT_S) || 25;
+
+/** Pause annulable. */
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Tâche annulée.'));
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(t);
+      reject(new Error('Tâche annulée.'));
+    }, { once: true });
+  });
+}
+
 /** Signal combinant l'annulation demandée et un délai maximal par appel (un modèle saturé ne bloque pas tout). */
 function withTimeout(signal, ms = DEFAULT_TIMEOUT_MS) {
   const timeout = AbortSignal.timeout(ms);
@@ -230,26 +245,33 @@ const gemini = {
 // Fournisseurs compatibles OpenAI (fetch)
 // ---------------------------------------------------------------------------
 
-function openAICompatible({ id, name, baseUrl, keyEnv, models, fallbacks = [], extraHeaders = {}, keyless = false, configuredWhen }) {
+function openAICompatible({ id, name, baseUrl, keyEnv, models, fallbacks = [], visionModels = null, extraHeaders = {}, keyless = false, configuredWhen }) {
   return {
     id,
     name,
+    // Analyse d'images (captures, miniatures) avec les modèles « vision » du fournisseur.
+    vision: Boolean(visionModels),
     isConfigured: configuredWhen || (() => keyPool.getKeys(id).length > 0),
     model(tier) {
       const prefix = id.toUpperCase();
       const fast = tier === 'fast';
       return cleanModel((fast && process.env[`${prefix}_MODEL_FAST`]) || process.env[`${prefix}_MODEL`] || (fast ? models.fast : models.smart));
     },
-    async generate({ system, prompt, schema, tier, signal, temperature = 0.7, timeoutMs, model: forced, slim }) {
+    async generate({ system, prompt, schema, tier, signal, temperature = 0.7, timeoutMs, model: forced, slim, images }) {
       const primary = forced ? cleanModel(forced) : this.model(tier);
       // Chaîne de modèles (les gratuits d'OpenRouter sont souvent saturés à tour de rôle) ;
       // ceux mis de côté récemment passent en dernier.
-      const chain = forced ? [primary] : [...new Set([primary, ...fallbacks, this.model(tier === 'fast' ? 'smart' : 'fast')])];
+      // Jamais de repli vers le petit modèle pour une demande « smart » / « max » : il suit mal les consignes.
+      const withImages = Boolean(images?.length && visionModels);
+      const chain = withImages
+        ? forced && visionModels.includes(cleanModel(forced)) ? [cleanModel(forced)] : visionModels
+        : forced ? [primary] : [...new Set([primary, ...fallbacks, ...(tier === 'fast' ? [this.model('smart')] : [])])];
       const ordered = [...chain.filter((m) => !keyPool.isModelCooling(id, m)), ...chain.filter((m) => keyPool.isModelCooling(id, m))];
       const url = `${(typeof baseUrl === 'function' ? baseUrl() : baseUrl).replace(/\/$/, '')}/chat/completions`;
       // Les fournisseurs compatibles n'acceptent pas tous un schéma JSON strict :
       // le schéma est décrit dans le prompt et la sortie forcée en objet JSON.
-      const userContent = schema ? `${prompt}\n\nRéponds UNIQUEMENT avec un objet JSON respectant ce schéma :\n${JSON.stringify(schema)}` : prompt;
+      const text = schema ? `${prompt}\n\nRéponds UNIQUEMENT avec un objet JSON respectant ce schéma :\n${JSON.stringify(schema)}` : prompt;
+      const userContent = withImages ? [{ type: 'text', text }, ...images.map((im) => ({ type: 'image_url', image_url: { url: `data:${im.mimeType};base64,${im.data}` } }))] : text;
       const call = async (payload, key) => {
         const headers = { 'Content-Type': 'application/json', ...extraHeaders };
         if (!keyless) headers.Authorization = `Bearer ${key}`;
@@ -262,10 +284,22 @@ function openAICompatible({ id, name, baseUrl, keyEnv, models, fallbacks = [], e
         }
         const text = await res.text();
         if (!res.ok) {
-          throw new ProviderError(`${name} (${res.status}) : ${text.slice(0, 300)}`, { status: res.status });
+          const err = new ProviderError(`${name} (${res.status}) : ${text.slice(0, 300)}`, { status: res.status });
+          // Limite par minute : délai d'attente indiqué (en-tête retry-after ou « try again in 7.5s »).
+          const header = Number(res.headers.get('retry-after'));
+          const inText = text.match(/try again in\s+(?:(\d+)m)?([\d.]+)(ms|s)\b/i);
+          if (inText) err.retryAfter = (Number(inText[1]) || 0) * 60 + Number(inText[2]) / (inText[3] === 'ms' ? 1000 : 1);
+          else if (Number.isFinite(header) && header > 0) err.retryAfter = header;
+          const tpm = text.match(/Limit\s+(\d+),\s*Used\s+(\d+),\s*Requested\s+(\d+)/i);
+          // Demande plus grosse que la limite elle-même : attendre ne sert à rien.
+          if (tpm && Number(tpm[3]) > Number(tpm[1])) err.tooBig = true;
+          throw err;
         }
         return JSON.parse(text);
       };
+      const isTooBig = (err) => err instanceof ProviderError && (err.tooBig || err.status === 413 || /too large|context length|maximum context/i.test(err.message));
+      const isRateLimited = (err) => err instanceof ProviderError && err.status === 429 && !err.tooBig && err.retryAfter > 0 && err.retryAfter <= MAX_RATE_WAIT_S && !/upstream|Provider returned error/i.test(err.message);
+      const slimBody = (body) => ({ ...body, messages: [{ role: 'system', content: slim.system }, { role: 'user', content: slim.prompt }] });
 
       let lastErr;
       for (const model of ordered) {
@@ -295,10 +329,23 @@ function openAICompatible({ id, name, baseUrl, keyEnv, models, fallbacks = [], e
               if (err instanceof ProviderError && err.status === 400 && /response_format|json_object|json mode/i.test(err.message)) {
                 const { response_format, ...rest } = body;
                 json = await call(rest, key);
-              } else if (slim && err instanceof ProviderError && (err.status === 413 || /too large|tokens per minute|\bTPM\b|context length|maximum context/i.test(err.message))) {
+              } else if (isRateLimited(err) && key === keys[keys.length - 1]) {
+                // (avec plusieurs clés, on passe d'abord simplement à la clé suivante)
+                // Quota par minute momentanément atteint : attendre quelques secondes vaut mieux
+                // que de basculer sur des IA gratuites saturées qui finissent par expirer.
+                console.warn(`[llm:${id}] ${model} : limite par minute, nouvel essai dans ${err.retryAfter.toFixed(1)} s.`);
+                await sleep(err.retryAfter * 1000 + 300, signal);
+                try {
+                  json = await call(body, key);
+                } catch (again) {
+                  if (!slim || !(isTooBig(again) || isRateLimited(again))) throw again;
+                  console.warn(`[llm:${id}] ${model} : toujours limité, nouvel essai en version allégée.`);
+                  json = await call(slimBody(body), key);
+                }
+              } else if (slim && (isTooBig(err) || /tokens per minute|\bTPM\b/i.test(err.message))) {
                 // Demande trop grosse pour l'offre gratuite : version allégée du même message.
                 console.warn(`[llm:${id}] demande trop grosse pour ${model}, nouvel essai en version allégée.`);
-                json = await call({ ...body, messages: [{ role: 'system', content: slim.system }, { role: 'user', content: slim.prompt }] }, key);
+                json = await call(slimBody(body), key);
               } else throw err;
             }
             const content = json?.choices?.[0]?.message?.content;
@@ -359,7 +406,8 @@ const openrouter = openAICompatible({
   // Modèles « :free » qui répondent bien en JSON ; les gratuits sont souvent saturés à tour de rôle,
   // d'où la chaîne de relais (Gemma 4 = modèle ouvert de Google, cousin de Gemini).
   models: { fast: 'poolside/laguna-s-2.1:free', smart: 'nvidia/nemotron-3-ultra-550b-a55b:free' },
-  fallbacks: ['nvidia/nemotron-3-ultra-550b-a55b:free', 'poolside/laguna-s-2.1:free', 'google/gemma-4-31b-it:free', 'dots-studio/dots-3-note-preview:free', 'nvidia/nemotron-3.5-super-vl:free', 'google/gemma-4-26b-a4b-it:free'],
+  fallbacks: ['nvidia/nemotron-3-ultra-550b-a55b:free', 'google/gemma-4-31b-it:free', 'dots-studio/dots-3-note-preview:free', 'nvidia/nemotron-3.5-super-vl:free'],
+  visionModels: ['nvidia/nemotron-3.5-super-vl:free', 'google/gemma-4-31b-it:free', 'google/gemma-4-26b-a4b-it:free'],
   extraHeaders: { 'X-Title': 'ClipTok' },
 });
 
@@ -369,6 +417,8 @@ const mistral = openAICompatible({
   baseUrl: 'https://api.mistral.ai/v1',
   keyEnv: 'MISTRAL_API_KEY',
   models: { fast: 'mistral-small-latest', smart: 'mistral-large-latest' },
+  fallbacks: ['mistral-medium-latest'],
+  visionModels: ['mistral-medium-latest', 'mistral-small-latest'],
 });
 
 const cerebras = openAICompatible({
@@ -376,7 +426,9 @@ const cerebras = openAICompatible({
   name: 'Cerebras (gratuit)',
   baseUrl: 'https://api.cerebras.ai/v1',
   keyEnv: 'CEREBRAS_API_KEY',
-  models: { fast: 'llama-3.3-70b', smart: 'llama-3.3-70b' },
+  // gpt-oss-120b (OpenAI, modèle ouvert) et Qwen 3 235B : gros modèles gratuits, très rapides chez Cerebras.
+  models: { fast: 'gpt-oss-120b', smart: 'gpt-oss-120b' },
+  fallbacks: ['qwen-3-235b-a22b-instruct-2507', 'llama-3.3-70b'],
 });
 
 const ollama = openAICompatible({

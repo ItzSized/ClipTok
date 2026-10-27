@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Play, Square, Plus, Music, RefreshCw } from 'lucide-react';
+import { Play, Square, Plus, Music, RefreshCw, Mic, ChevronDown } from 'lucide-react';
 import UploadDropzone from '@/components/media/UploadDropzone';
+import { VoiceOverForm } from '@/components/media/VoiceOver';
 import { getSfx, listMedia, absoluteFileUrl } from '@/lib/api';
 import type { Media, SfxItem } from '@/lib/types';
 import { useEditor, useEditorStore } from '../store';
@@ -18,6 +19,7 @@ export default function AudioPanel() {
   const [audio, setAudio] = useState<Media[]>([]);
   const [playing, setPlaying] = useState<string | null>(null);
   const player = useRef<HTMLAudioElement | null>(null);
+  const [voiceOpen, setVoiceOpen] = useState(true);
 
   useEffect(() => {
     getSfx().then(setSfx).catch(() => { });
@@ -48,6 +50,20 @@ export default function AudioPanel() {
     for (const s of sfx) map.set(s.category, [...(map.get(s.category) || []), s]);
     return [...map.entries()];
   }, [sfx]);
+
+  // Bibliothèque (D:) : voix off, musiques et sons courts rangés séparément.
+  const libraryGroups = useMemo(() => {
+    const kindOf = (m: Media) => m.library || (m.source === 'tts' ? 'voice' : m.duration > 0 && m.duration <= 20 ? 'sfx' : 'music');
+    return (
+      [
+        ['voice', 'Mes voix off'],
+        ['music', 'Mes musiques'],
+        ['sfx', 'Mes sons (SFX)'],
+      ] as const
+    )
+      .map(([k, label]) => [label, audio.filter((m) => kindOf(m) === k)] as const)
+      .filter(([, list]) => list.length > 0);
+  }, [audio]);
 
   const Row = ({ id, name, url, duration, onAdd, onReplace, drag }: { id: string; name: string; url: string; duration: number; onAdd: () => void; onReplace?: () => void; drag: string }) => (
     <div
@@ -85,25 +101,44 @@ export default function AudioPanel() {
           Son sélectionné : <b className="text-white">{selectedAudio.name}</b>. Cliquez sur <b>Remplacer</b> à côté d'un son pour l'échanger, ou sur <b>+</b> pour en ajouter un autre.
         </div>
       )}
+      <div className="rounded-xl border border-fuchsia-500/30 bg-fuchsia-500/[0.04] p-2.5">
+        <button onClick={() => setVoiceOpen((v) => !v)} className="w-full flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-fuchsia-200">
+          <Mic className="w-3.5 h-3.5" /> Voix off (texte → voix)
+          <ChevronDown className={`w-3.5 h-3.5 ml-auto transition-transform ${voiceOpen ? 'rotate-180' : ''}`} />
+        </button>
+        {voiceOpen && (
+          <div className="mt-2">
+            <VoiceOverForm
+              onCreated={(m) => {
+                setAudio((a) => [m, ...a.filter((x) => x.id !== m.id)]);
+                store.addMedia(m);
+              }}
+            />
+          </div>
+        )}
+      </div>
       <div>
         <h3 className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mb-2 flex items-center gap-1.5">
           <Music className="w-3.5 h-3.5" /> Musique & sons importés
         </h3>
-        <UploadDropzone compact accept="audio/*,video/*" onUploaded={(list) => setAudio((a) => [...list.filter((m) => m.kind === 'audio'), ...a])} title="Importer une musique" subtitle="MP3, WAV, M4A…" />
-        <div className="mt-2 flex flex-col">
-          {audio.map((m) => (
-            <Row
-              key={m.id}
-              id={m.id}
-              name={m.name}
-              url={m.url}
-              duration={m.duration}
-              onAdd={() => store.addMedia(m)}
-              onReplace={selectedAudio ? () => store.replaceClipAudio(selectedAudio.id, { id: m.id, name: m.name, src: m.url, duration: m.duration }) : undefined}
-              drag={JSON.stringify({ type: 'media', media: m })}
-            />
-          ))}
-        </div>
+        <UploadDropzone compact accept="audio/*,video/*" onUploaded={(list) => setAudio((a) => [...list.filter((m) => m.kind === 'audio'), ...a])} title="Importer une musique ou un son" subtitle="Rangés automatiquement sur D: (Musiques / SFX)" />
+        {libraryGroups.map(([label, list]) => (
+          <div key={label} className="mt-2">
+            <h4 className="text-[10px] font-bold uppercase tracking-wider text-zinc-600 px-2">{label}</h4>
+            {list.map((m) => (
+              <Row
+                key={m.id}
+                id={m.id}
+                name={m.name}
+                url={m.url}
+                duration={m.duration}
+                onAdd={() => store.addMedia(m)}
+                onReplace={selectedAudio ? () => store.replaceClipAudio(selectedAudio.id, { id: m.id, name: m.name, src: m.url, duration: m.duration }) : undefined}
+                drag={JSON.stringify({ type: 'media', media: m })}
+              />
+            ))}
+          </div>
+        ))}
       </div>
       {groups.map(([category, items]) => (
         <div key={category}>

@@ -136,7 +136,10 @@ export default function PreviewCanvas() {
     if (g.kind === 'tap' || (g.kind === 'move' && !g.moved) || (g.kind === 'caption' && !g.moved)) {
       const p = toCanvas(e);
       const hit = engine.hitTest(p.x, p.y);
-      if (hit) store.select([hit], e.shiftKey);
+      if (hit) {
+        store.select([hit], e.shiftKey);
+        tapOn(hit);
+      }
       else if (g.kind !== 'caption') {
         // Clic sur les sous-titres (zone basse/milieu) : sélection du clip de sous-titres actif.
         const cap = project.clips.find((c) => c.type === 'caption' && engine.time >= c.start && engine.time < core.clipEnd(c));
@@ -150,6 +153,30 @@ export default function PreviewCanvas() {
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     if (selectedClip?.type === 'caption') gesture.current = { kind: 'caption', id: selectedClip.id, moved: false, sx: e.clientX, sy: e.clientY };
     else gesture.current = { kind: 'tap', sx: e.clientX, sy: e.clientY };
+  };
+
+  // Édition du texte directement dans l'aperçu (double-clic sur un texte).
+  const [editing, setEditing] = useState<{ id: string; original: string } | null>(null);
+  const editClip = editing ? project.clips.find((c) => c.id === editing.id) : null;
+  const editGeo = editClip ? engine.geometry(editClip, time) : null;
+
+  // Double-clic détecté à la main : le premier clic fait apparaître le cadre de sélection,
+  // qui capte le second (le « dblclick » natif du navigateur se perd entre les deux).
+  const lastTap = useRef<{ id: string; t: number } | null>(null);
+  const tapOn = (id: string) => {
+    const now = performance.now();
+    const isDouble = lastTap.current?.id === id && now - lastTap.current.t < 450;
+    lastTap.current = { id, t: now };
+    const clip = project.clips.find((c) => c.id === id);
+    if (!isDouble || clip?.type !== 'text') return;
+    lastTap.current = null;
+    engine.pause();
+    setEditing({ id: clip.id, original: clip.text || '' });
+  };
+
+  const finishEdit = (cancel = false) => {
+    if (editing && cancel) store.patchClip(editing.id, { text: editing.original }, `text:${editing.id}`);
+    setEditing(null);
   };
 
   const fps = project.settings.fps || 30;
@@ -219,6 +246,35 @@ export default function PreviewCanvas() {
                 <RotateCw className="w-3.5 h-3.5" />
               </div>
             </div>
+          )}
+
+          {editing && editClip && (
+            <textarea
+              autoFocus
+              value={editClip.text || ''}
+              onFocus={(e) => e.currentTarget.select()}
+              onChange={(e) => store.patchClip(editClip.id, { text: e.target.value }, `text:${editClip.id}`)}
+              onBlur={() => finishEdit()}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Escape') finishEdit(true);
+                else if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  finishEdit();
+                }
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+              rows={Math.min(4, (editClip.text || '').split('\n').length)}
+              className="absolute z-20 bg-black/85 border-2 border-cyan-400 rounded-lg px-2 py-1 text-sm font-bold text-white text-center outline-none resize-none shadow-xl"
+              style={{
+                left: Math.max(4, Math.min(box.w - Math.max(200, (editGeo?.w || 0) / dpr) - 4, (editGeo ? editGeo.cx / dpr : box.w / 2) - Math.max(200, (editGeo?.w || 0) / dpr) / 2)),
+                top: Math.max(4, Math.min(box.h - 40, (editGeo ? editGeo.cy / dpr : box.h / 2) - 18)),
+                width: Math.min(box.w - 8, Math.max(200, (editGeo?.w || 0) / dpr)),
+              }}
+              placeholder="Votre texte"
+              title="Entrée : valider · Maj+Entrée : nouvelle ligne · Échap : annuler"
+            />
           )}
         </div>
       </div>

@@ -1,0 +1,48 @@
+{
+  "name": "cliptok-desktop",
+  "productName": "ClipTok",
+  "version": "1.0.0",
+  "description": "ClipTok — montage vidéo IA (application Windows)",
+  "author": "ItzSized",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "node scripts/write-config.js && electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "com.itzsized.cliptok",
+    "productName": "ClipTok",
+    "copyright": "ItzSized",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "launcher.js",
+      "splash.html",
+      "app-config.json",
+      "build/icon.png",
+      "build/icon-32.png"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ClipTok",
+      "runAfterFinish": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  }
+}

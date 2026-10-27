@@ -3,6 +3,9 @@ const db = require('../services/db');
 const llm = require('../services/llm');
 const keyPool = require('../services/llm/keys');
 const { webSearch } = require('../services/webSearch');
+const { fetchWebMedia } = require('../services/webMedia');
+const { queueDescribe } = require('../services/mediaVision');
+const media = require('../services/media');
 const aiEditor = require('../../shared/aiEditor');
 
 const router = express.Router();
@@ -10,7 +13,8 @@ const MAX_CONTEXT_CHARS = 120000;
 
 /** Modes de l'Éditeur IA : niveau de modèle, délai, nombre de tours de recherche web. */
 const MODES = {
-  fast: { tier: 'fast', timeoutMs: 30000, searchRounds: 1 },
+  // Même en rapide, le « gros » modèle (Groq gpt-oss-120b répond en 1-3 s) : les petits suivent mal les consignes.
+  fast: { tier: 'smart', timeoutMs: 30000, searchRounds: 1 },
   balanced: { tier: 'smart', timeoutMs: 45000, searchRounds: 2 },
   max: { tier: 'max', timeoutMs: 120000, searchRounds: 3 },
 };
@@ -35,6 +39,25 @@ router.get('/search', async (req, res) => {
 });
 
 /**
+ * Visuel trouvé sur le web (capture d'un site, image, extrait vidéo) ajouté aux médias.
+ * Corps : { query, kind: 'screenshot'|'image'|'video', url?, start?, duration? }
+ */
+router.post('/web-media', async (req, res) => {
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  try {
+    const doc = await fetchWebMedia(req.body || {}, controller.signal);
+    // L'IA « regarde » le nouveau visuel en arrière-plan (description pour les demandes suivantes).
+    if (llm.hasProvider() && doc.kind !== 'audio') queueDescribe([doc.id]);
+    res.json(media.summarize(doc));
+  } catch (err) {
+    if (!controller.signal.aborted) res.status(502).json({ error: String(err.message).split('\n')[0].slice(0, 300) });
+  }
+});
+
+/**
  * Éditeur IA : transforme une demande en langage naturel en plan d'actions.
  * Corps : { request, history, context, provider?, model?, mode?: 'fast'|'balanced'|'max', webSearch?: boolean }
  * Si l'IA a besoin d'informations, elle demande des recherches web ; on les
@@ -53,6 +76,10 @@ router.post('/edit', async (req, res) => {
     if (contextJson.length > MAX_CONTEXT_CHARS) return res.status(413).json({ error: 'Projet trop volumineux pour l’assistant IA.' });
   }
   const settings = MODES[mode] || MODES.balanced;
+  // Mode automatique : la discussion garde l'IA qui a répondu au message précédent (même
+  // modèle tout du long), sauf si elle tombe en panne. Jamais le petit modèle « rapide ».
+  const sticky = req.body?.sticky && typeof req.body.sticky.provider === 'string' ? req.body.sticky : null;
+  const chosen = provider ? { provider, model } : sticky ? { provider: sticky.provider, model: llm.isFastModel(sticky.provider, sticky.model) ? undefined : sticky.model } : {};
 
   // Annule l'appel à l'IA si le navigateur abandonne la requête. Écouter `res`
   // (et non `req`, dont 'close' survient dès que le corps POST est lu).
@@ -63,24 +90,30 @@ router.post('/edit', async (req, res) => {
 
   try {
     const research = [];
-    const ask = () =>
+    const parsedContext = JSON.parse(contextJson);
+    const cleanHistory = (Array.isArray(history) ? history : []).filter((m) => m && typeof m.content === 'string');
+    const ask = (repair) =>
       llm.generateJson({
         system: aiEditor.buildSystemPrompt({ webSearch: Boolean(allowSearch), mode }),
-        prompt: aiEditor.buildUserPrompt(JSON.parse(contextJson), history, request.trim().slice(0, 2000), research),
+        prompt: aiEditor.buildUserPrompt(parsedContext, cleanHistory, request.trim().slice(0, 2000), research, { repair }),
         // Si la demande est trop grosse pour une IA gratuite (limite de jetons par minute), version allégée.
         slim: {
           system: aiEditor.buildSystemPrompt({ webSearch: false, mode, slim: true }),
-          prompt: aiEditor.buildUserPrompt(aiEditor.slimContext(JSON.parse(contextJson)), history, request.trim().slice(0, 1500), research.map((r) => ({ ...r, summary: String(r.summary || '').slice(0, 600) })), { slim: true }),
+          prompt: aiEditor.buildUserPrompt(aiEditor.slimContext(parsedContext), cleanHistory, request.trim().slice(0, 1500), research.map((r) => ({ ...r, summary: String(r.summary || '').slice(0, 600) })), { slim: true, repair }),
         },
         tier: settings.tier,
-        temperature: mode === 'fast' ? 0.3 : 0.4,
-        preferred: provider,
-        model,
+        // Température basse : on veut un plan qui suit les consignes, pas de la créativité.
+        temperature: mode === 'max' ? 0.35 : 0.2,
+        // Cohérence : une fois qu'une IA a répondu, les tours de recherche et la correction
+        // repartent du MÊME fournisseur et du même modèle (pas de mélange en cours de route).
+        preferred: result ? result.provider : chosen.provider,
+        model: result ? result.model : chosen.model,
         signal: controller.signal,
         timeoutMs: settings.timeoutMs,
       });
 
-    let result = await ask();
+    let result;
+    result = await ask();
     for (let round = 0; round < settings.searchRounds && allowSearch; round++) {
       const queries = (Array.isArray(result.data.search) ? result.data.search : [])
         .filter((q) => typeof q === 'string' && q.trim())
@@ -92,6 +125,21 @@ router.post('/edit', async (req, res) => {
       );
       research.push(...found);
       result = await ask();
+    }
+
+    // Plan incohérent (clip / média / effet inventé) : une passe de correction, on garde le meilleur.
+    const problems = aiEditor.validatePlan(result.data, parsedContext, request);
+    if (problems.length) {
+      console.warn(`[ai] Plan à corriger (${problems.length} problème(s)) : ${problems.slice(0, 3).join(' | ')}`);
+      try {
+        const first = result;
+        const fixed = await ask({ problems: problems.slice(0, 15), actions: result.data.actions });
+        const remaining = aiEditor.validatePlan(fixed.data, parsedContext, request);
+        result = remaining.length <= problems.length ? fixed : first;
+      } catch (err) {
+        if (controller.signal.aborted) throw err;
+        console.warn(`[ai] Correction impossible : ${err.message}`);
+      }
     }
 
     const data = result.data;

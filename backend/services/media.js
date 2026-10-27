@@ -31,7 +31,24 @@ const UPLOADS_DIR = path.join(MEDIA_DIR, 'uploads');
 const CACHE_DIR = path.join(MEDIA_DIR, 'cache');
 const OUTPUT_DIR = STORAGE_ROOT ? path.join(STORAGE_ROOT, 'clips') : path.join(BACKEND_DIR, '..', 'clips');
 const TEMP_DIR = STORAGE_ROOT ? path.join(STORAGE_ROOT, 'temp') : path.join(BACKEND_DIR, 'temp');
-const SFX_DIR = path.join(BACKEND_DIR, 'assets', 'sfx');
+
+/**
+ * Bibliothèque audio (sur D: avec STORAGE_DIR) : les musiques et sons importés y
+ * sont rangés automatiquement sous leur vrai nom, les voix off générées aussi.
+ * Tout fichier audio déposé à la main dans ces dossiers apparaît dans l'éditeur.
+ */
+const LIBRARY_DIR = path.join(MEDIA_DIR, 'Bibliotheque');
+const LIBRARY = {
+  music: path.join(LIBRARY_DIR, 'Musiques'),
+  sfx: path.join(LIBRARY_DIR, 'SFX'),
+  voice: path.join(LIBRARY_DIR, 'Voix'),
+};
+/** Sons intégrés (générés par sfx.js), dans un sous-dossier de la bibliothèque SFX. */
+const LEGACY_SFX_DIR = path.join(BACKEND_DIR, 'assets', 'sfx');
+const SFX_DIR = STORAGE_ROOT ? path.join(LIBRARY.sfx, 'ClipTok') : LEGACY_SFX_DIR;
+/** Au-delà de cette durée, un son importé est rangé dans Musiques plutôt que SFX. */
+const SFX_MAX_DURATION = 20;
+const AUDIO_EXT = /\.(mp3|wav|m4a|aac|ogg|oga|opus|flac|wma)$/i;
 
 /** Préfixes d'URL publiques -> dossiers disque (voir les express.static de server.js). */
 const PUBLIC_ROOTS = {
@@ -76,11 +93,46 @@ function kindFromMeta(meta, mimetype = '') {
   return null;
 }
 
+/** Dossier de bibliothèque d'un fichier ('music' | 'sfx' | 'voice'), ou null. */
+function libraryOf(filePath) {
+  if (isInside(SFX_DIR, filePath)) return null;
+  return Object.keys(LIBRARY).find((k) => isInside(LIBRARY[k], filePath)) || null;
+}
+
+/** Nom de fichier lisible et libre dans `dir` (« Musique.mp3 », « Musique (2).mp3 »...). */
+async function freeName(dir, name, ext) {
+  const base = (path.basename(name).replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim() || 'son').slice(0, 120);
+  for (let i = 1; ; i++) {
+    const candidate = path.join(dir, `${base}${i > 1 ? ` (${i})` : ''}${ext}`);
+    try {
+      await fs.access(candidate);
+    } catch {
+      return candidate;
+    }
+  }
+}
+
+/** Range un son importé dans la bibliothèque (Musiques ou SFX selon sa durée). */
+async function moveToLibrary(filePath, name, duration) {
+  const dir = duration > 0 && duration <= SFX_MAX_DURATION ? LIBRARY.sfx : LIBRARY.music;
+  await fs.mkdir(dir, { recursive: true });
+  const target = await freeName(dir, name || path.basename(filePath), path.extname(filePath).toLowerCase());
+  try {
+    await fs.rename(filePath, target);
+  } catch {
+    // Autre disque : copie puis suppression.
+    await fs.copyFile(filePath, target);
+    await fs.unlink(filePath).catch(() => { });
+  }
+  return target;
+}
+
 /** Enregistre un fichier déjà présent sur disque comme média. */
-async function registerFile(filePath, { name, mimetype, source = 'upload', size } = {}) {
+async function registerFile(filePath, { name, mimetype, source = 'upload', size, toLibrary = false, extra = {} } = {}) {
   const meta = await probeMedia(filePath);
   const kind = kindFromMeta(meta, mimetype);
   if (!kind) throw new Error(`Format non pris en charge : ${name || path.basename(filePath)}`);
+  if (toLibrary && kind === 'audio') filePath = await moveToLibrary(filePath, name, meta.duration);
   const url = publicUrlFor(filePath);
   if (!url) throw new Error('Fichier hors des dossiers publics.');
   return db.createDoc('media', {
@@ -94,8 +146,48 @@ async function registerFile(filePath, { name, mimetype, source = 'upload', size 
     height: meta.height,
     fps: meta.fps,
     hasAudio: meta.hasAudio,
+    library: libraryOf(filePath),
     transcript: null,
+    ...extra,
   });
+}
+
+let lastScan = 0;
+let scanning = null;
+
+/**
+ * Ajoute aux médias les fichiers audio déposés à la main dans la bibliothèque
+ * (au plus une fois toutes les 15 s ; les sons intégrés de ClipTok sont ignorés).
+ */
+function scanLibrary(force = false) {
+  if (scanning) return scanning;
+  if (!force && Date.now() - lastScan < 15000) return Promise.resolve(0);
+  lastScan = Date.now();
+  scanning = (async () => {
+    const known = new Set((await db.listDocs('media')).map((m) => m.url));
+    let added = 0;
+    const walk = async (dir, depth) => {
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (depth < 3 && full !== SFX_DIR) await walk(full, depth + 1);
+        } else if (AUDIO_EXT.test(e.name) && !known.has(publicUrlFor(full))) {
+          try {
+            await registerFile(full, { name: e.name, source: 'library' });
+            added += 1;
+          } catch (err) {
+            console.warn(`[bibliothèque] ${e.name} ignoré : ${err.message.split('\n')[0]}`);
+          }
+        }
+      }
+    };
+    for (const dir of Object.values(LIBRARY)) await walk(dir, 0);
+    return added;
+  })().finally(() => {
+    scanning = null;
+  });
+  return scanning;
 }
 
 /** Version allégée d'un média pour les listes (sans les mots de transcription). */
@@ -114,7 +206,7 @@ async function deleteMedia(id) {
   if (!doc) return null;
   const filePath = resolvePublicPath(doc.url);
   // On ne supprime physiquement que les fichiers importés (pas les clips générés ni les sons intégrés).
-  if (filePath && isInside(UPLOADS_DIR, filePath)) await fs.unlink(filePath).catch(() => { });
+  if (filePath && (isInside(UPLOADS_DIR, filePath) || libraryOf(filePath))) await fs.unlink(filePath).catch(() => { });
   for (const suffix of ['.thumb.jpg', '.peaks.json']) await fs.unlink(path.join(CACHE_DIR, id + suffix)).catch(() => { });
   return doc;
 }
@@ -196,7 +288,12 @@ async function computeWaveform(doc, rate, target) {
 }
 
 async function ensureDirs() {
-  for (const dir of [MEDIA_DIR, UPLOADS_DIR, CACHE_DIR, OUTPUT_DIR, TEMP_DIR, SFX_DIR]) await fs.mkdir(dir, { recursive: true });
+  for (const dir of [MEDIA_DIR, UPLOADS_DIR, CACHE_DIR, OUTPUT_DIR, TEMP_DIR, SFX_DIR, ...Object.values(LIBRARY)]) await fs.mkdir(dir, { recursive: true });
+  // Sons intégrés déjà générés dans l'ancien dossier du projet : copiés plutôt que regénérés.
+  if (SFX_DIR !== LEGACY_SFX_DIR) {
+    const files = await fs.readdir(LEGACY_SFX_DIR).catch(() => []);
+    for (const f of files) await fs.copyFile(path.join(LEGACY_SFX_DIR, f), path.join(SFX_DIR, f), fsSync.constants.COPYFILE_EXCL).catch(() => { });
+  }
 }
 
 module.exports = {
@@ -207,9 +304,12 @@ module.exports = {
   OUTPUT_DIR,
   TEMP_DIR,
   SFX_DIR,
+  LIBRARY,
   resolvePublicPath,
   publicUrlFor,
   registerFile,
+  scanLibrary,
+  freeName,
   summarize,
   deleteMedia,
   getThumbnail,

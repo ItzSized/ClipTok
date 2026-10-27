@@ -13,7 +13,10 @@
     "build": "npm run build --prefix frontend",
     "start": "concurrently -n api,web -c magenta,cyan \"npm start --prefix backend\" \"npm start --prefix frontend\"",
     "prod": "npm run build && npm start",
-    "dev:hot": "concurrently -n api,web,warmup -c magenta,cyan,gray \"npm run dev:backend\" \"npm run dev:frontend\" \"node scripts/warmup.js\""
+    "dev:hot": "concurrently -n api,web,warmup -c magenta,cyan,gray \"npm run dev:backend\" \"npm run dev:frontend\" \"node scripts/warmup.js\"",
+    "install:desktop": "npm install --prefix desktop",
+    "app": "npm start --prefix desktop",
+    "app:build": "npm run dist --prefix desktop"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

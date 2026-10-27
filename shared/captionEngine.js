@@ -326,6 +326,90 @@ const PRESETS = [
     description: 'Karaoké rose, casse normale, 2 lignes.',
     style: { fontId: 'Poppins-Bold', fontSize: 0.052, uppercase: false, outlineWidth: 0.06, highlightColors: ['#F472B6'], highlightScale: 1, animation: 'karaoke', wordsPerPage: 7, maxLines: 2, maxCharsPerLine: 24 },
   },
+  {
+    id: 'tiktok',
+    name: 'TikTok',
+    description: 'Style natif TikTok : texte blanc sur bandeau noir, casse normale.',
+    style: { fontId: 'Poppins-ExtraBold', fontSize: 0.05, uppercase: false, outlineWidth: 0, shadowOpacity: 0, background: 'box', backgroundColor: '#000000', backgroundOpacity: 0.75, boxPadding: 0.2, highlightMode: 'none', highlightScale: 1, animation: 'fade', wordsPerPage: 6, maxLines: 2, maxCharsPerLine: 22 },
+  },
+  {
+    id: 'comic',
+    name: 'BD',
+    description: 'Bangers jaune façon bande dessinée, mot actif rouge qui pop.',
+    style: { fontId: 'Bangers-Regular', fontSize: 0.085, letterSpacing: 0.03, textColor: '#FFE600', outlineColor: '#000000', outlineWidth: 0.1, shadowDepth: 0.08, shadowOpacity: 1, highlightColors: ['#FF2D2D'], highlightScale: 1.2, animation: 'word-pop', wordsPerPage: 3, maxCharsPerLine: 14 },
+  },
+  {
+    id: 'candy',
+    name: 'Bonbon',
+    description: 'Lilita One blanche, contour violet, mot actif jaune, rebond.',
+    style: { fontId: 'LilitaOne-Regular', fontSize: 0.072, textColor: '#FFFFFF', outlineColor: '#6D28D9', outlineWidth: 0.11, shadowOpacity: 0, highlightColors: ['#FDE047'], highlightScale: 1.16, animation: 'bounce', wordsPerPage: 3, maxCharsPerLine: 14 },
+  },
+  {
+    id: 'script',
+    name: 'Élégant',
+    description: 'Pacifico manuscrite, casse normale, fondu doux.',
+    style: { fontId: 'Pacifico-Regular', fontSize: 0.058, uppercase: false, textColor: '#FFFFFF', outlineWidth: 0.03, shadowDepth: 0.04, shadowOpacity: 0.8, highlightColors: ['#FBCFE8'], highlightScale: 1.05, animation: 'fade', wordsPerPage: 4, maxCharsPerLine: 20 },
+  },
+  {
+    id: 'podcast',
+    name: 'Podcast',
+    description: 'Montserrat Black, mot actif dans une boîte verte, glisse vers le haut.',
+    style: { fontId: 'Montserrat-Black', fontSize: 0.058, outlineWidth: 0.05, highlightMode: 'box', highlightColors: ['#22C55E'], highlightTextColor: '#FFFFFF', highlightScale: 1.05, boxPadding: 0.14, animation: 'slide-up', wordsPerPage: 4, maxCharsPerLine: 16 },
+  },
+  {
+    id: 'news',
+    name: 'Info / JT',
+    description: 'Bandeau rouge façon journal télé, en bas de l’écran.',
+    style: { fontId: 'Montserrat-ExtraBold', fontSize: 0.046, outlineWidth: 0, shadowOpacity: 0, background: 'box', backgroundColor: '#DC2626', backgroundOpacity: 0.95, boxPadding: 0.22, highlightColors: ['#FFE600'], highlightScale: 1, animation: 'slide-up', positionY: 0.84, wordsPerPage: 6, maxLines: 1, maxCharsPerLine: 28 },
+  },
+  {
+    id: 'retro',
+    name: 'Rétro 80s',
+    description: 'Russo One rose, contour cyan, halo, machine à écrire.',
+    style: { fontId: 'RussoOne-Regular', fontSize: 0.062, textColor: '#FF4FD8', outlineColor: '#00E5FF', outlineWidth: 0.06, glow: true, shadowOpacity: 0, highlightColors: ['#FFFFFF'], highlightScale: 1.06, animation: 'typewriter', wordsPerPage: 4, maxCharsPerLine: 16 },
+  },
+  {
+    id: 'ice',
+    name: 'Glace',
+    description: 'Kanit bleu glacier, contour bleu nuit, mot actif blanc.',
+    style: { fontId: 'Kanit-Black', fontSize: 0.068, textColor: '#BAE6FD', outlineColor: '#0C4A6E', outlineWidth: 0.08, shadowDepth: 0.05, shadowOpacity: 0.8, highlightColors: ['#FFFFFF'], highlightScale: 1.12, animation: 'word-pop', wordsPerPage: 3, maxCharsPerLine: 14 },
+  },
+  {
+    id: 'meme',
+    name: 'Mème',
+    description: 'Gros texte blanc en haut, contour noir épais, façon mème.',
+    style: { fontId: 'Anton-Regular', fontSize: 0.09, outlineWidth: 0.12, shadowOpacity: 0, highlightMode: 'none', highlightScale: 1, animation: 'pop', positionY: 0.16, wordsPerPage: 6, maxLines: 2, maxCharsPerLine: 18 },
+  },
+  {
+    id: 'loud',
+    name: 'Cri',
+    description: 'Les mots criés deviennent rouges et énormes.',
+    style: { fontId: 'Anton-Regular', fontSize: 0.08, outlineWidth: 0.1, shadowDepth: 0.06, shadowOpacity: 1, highlightColors: ['#FFE600'], highlightScale: 1.3, emphasizeLoud: true, loudColor: '#FF2D2D', animation: 'word-pop', wordsPerPage: 2, maxLines: 1, maxCharsPerLine: 14 },
+  },
+  {
+    id: 'one-word',
+    name: 'Mot par mot',
+    description: 'Un seul mot à la fois, énorme, au centre.',
+    style: { fontId: 'LuckiestGuy-Regular', fontSize: 0.1, outlineWidth: 0.1, shadowDepth: 0.07, shadowOpacity: 1, highlightColors: ['#FFFFFF'], highlightScale: 1, animation: 'pop', positionY: 0.55, wordsPerPage: 1, maxLines: 1, maxCharsPerLine: 14 },
+  },
+  {
+    id: 'pastel',
+    name: 'Pastel',
+    description: 'Contour lavande, mot actif dans une boîte rose.',
+    style: { fontId: 'Poppins-Black', fontSize: 0.058, outlineColor: '#7C3AED', outlineWidth: 0.07, shadowOpacity: 0, highlightMode: 'box', highlightColors: ['#F9A8D4'], highlightTextColor: '#3B0764', highlightScale: 1.05, boxPadding: 0.14, animation: 'bounce', wordsPerPage: 3, maxCharsPerLine: 14 },
+  },
+  {
+    id: 'karaoke-cyan',
+    name: 'Karaoké cyan',
+    description: 'Montserrat Black, remplissage cyan mot à mot.',
+    style: { fontId: 'Montserrat-Black', fontSize: 0.06, outlineWidth: 0.07, highlightColors: ['#22D3EE'], highlightScale: 1, animation: 'karaoke', wordsPerPage: 5, maxLines: 2, maxCharsPerLine: 18 },
+  },
+  {
+    id: 'documentary',
+    name: 'Documentaire',
+    description: 'Bebas Neue sobre, sans contour, ombre douce, en bas.',
+    style: { fontId: 'BebasNeue-Regular', fontSize: 0.06, letterSpacing: 0.05, outlineWidth: 0, shadowDepth: 0.04, shadowOpacity: 0.9, highlightMode: 'none', highlightScale: 1, animation: 'fade', positionY: 0.82, wordsPerPage: 7, maxLines: 2, maxCharsPerLine: 26 },
+  },
 ];
 
 /** Palettes de couleurs rapides pour les sous-titres : texte, contour, surlignage. */
@@ -394,7 +478,8 @@ function applyPreset(presetId, keep) {
   const preset = getPreset(presetId);
   const style = Object.assign({}, DEFAULT_STYLE, preset.style, { preset: preset.id });
   if (keep) {
-    for (const key of ['positionX', 'positionY']) if (keep[key] !== undefined) style[key] = keep[key];
+    // Un preset qui impose sa position (mème en haut, bandeau JT en bas) la garde.
+    for (const key of ['positionX', 'positionY']) if (keep[key] !== undefined && preset.style[key] === undefined) style[key] = keep[key];
   }
   return style;
 }

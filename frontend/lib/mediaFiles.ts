@@ -84,68 +84,121 @@ export interface UploadInfo {
 
 const CONCURRENCY = 3;
 
+type UploadResult = { media: Media[]; errors: { name: string; error: string }[] };
+
+interface Batch {
+  onProgress?: (percent: number, info: UploadInfo) => void;
+  onEach?: (media: Media[]) => void;
+  result: UploadResult;
+  remaining: number;
+  resolve: (r: UploadResult) => void;
+}
+
+interface Entry {
+  file: File;
+  loaded: number;
+  active: boolean;
+  batch: Batch;
+}
+
+/*
+ * File d'envoi commune à toute l'application : on peut ajouter des fichiers
+ * pendant que d'autres sont encore en cours d'envoi. Ils rejoignent la même file
+ * (3 envois en parallèle au total) et la progression affichée couvre tout ce qui
+ * est en cours. La session se termine quand la file est vide.
+ */
+let session: { entries: Entry[]; t0: number; done: number } | null = null;
+const pending: Entry[] = [];
+const batches = new Set<Batch>();
+let running = 0;
+let lastEmit = 0;
+
+function emit(force = false) {
+  if (!session) return;
+  const now = performance.now();
+  if (!force && now - lastEmit < 150) return;
+  lastEmit = now;
+  const total = session.entries.reduce((acc, e) => acc + e.file.size, 0) || 1;
+  const loaded = session.entries.reduce((acc, e) => acc + e.loaded, 0);
+  const elapsed = (now - session.t0) / 1000;
+  const speed = elapsed > 0.3 ? loaded / elapsed : 0;
+  const allSent = loaded >= total;
+  const percent = Math.min(100, (loaded / total) * 100);
+  const info: UploadInfo = {
+    percent,
+    loaded,
+    total,
+    done: session.done,
+    count: session.entries.length,
+    current: session.entries.filter((e) => e.active).map((e) => e.file.name),
+    speed,
+    eta: speed > 0 && !allSent ? (total - loaded) / speed : null,
+    phase: allSent ? 'processing' : 'upload',
+  };
+  for (const b of batches) b.onProgress?.(percent, info);
+}
+
+function pump() {
+  while (running < CONCURRENCY && pending.length) {
+    const entry = pending.shift()!;
+    const { file, batch } = entry;
+    running += 1;
+    entry.active = true;
+    emit(true);
+    uploadMedia([file], (pct) => {
+      entry.loaded = (file.size * pct) / 100;
+      emit();
+    })
+      .then((res) => {
+        batch.result.media.push(...res.media);
+        batch.result.errors.push(...(res.errors || []));
+        if (res.media.length) batch.onEach?.(res.media);
+      })
+      .catch((err: any) => {
+        batch.result.errors.push(...(err?.errors || [{ name: file.name, error: err?.message || 'Échec de l’envoi' }]));
+      })
+      .finally(() => {
+        entry.loaded = file.size;
+        entry.active = false;
+        running -= 1;
+        if (session) session.done += 1;
+        emit(true);
+        batch.remaining -= 1;
+        if (batch.remaining === 0) {
+          batches.delete(batch);
+          batch.resolve(batch.result);
+        }
+        if (running === 0 && pending.length === 0) session = null;
+        pump();
+      });
+  }
+}
+
+/** Des fichiers sont-ils en cours d'envoi (n'importe où dans l'application) ? */
+export function uploadsPending() {
+  return running > 0 || pending.length > 0;
+}
+
 /**
  * Envoi fichier par fichier, 3 en parallèle : chaque fichier apparaît dès qu'il
  * est prêt (onEach) au lieu d'attendre tout un paquet, et la progression
- * détaillée (fichier courant, Mo, vitesse, temps restant) est remontée.
+ * détaillée (fichier courant, Mo, vitesse, temps restant) est remontée. Un nouvel
+ * appel pendant un envoi ajoute ses fichiers à la file en cours.
  */
-export async function uploadMany(files: File[], onProgress?: (percent: number, info: UploadInfo) => void, onEach?: (media: Media[]) => void) {
-  const media: Media[] = [];
-  const errors: { name: string; error: string }[] = [];
-  const total = files.reduce((acc, f) => acc + f.size, 0) || 1;
-  const loadedBy = new Map<number, number>();
-  const active = new Set<number>();
-  let done = 0;
-  let next = 0;
-  const t0 = performance.now();
-  let lastEmit = 0;
-
-  const emit = (force = false) => {
-    const now = performance.now();
-    if (!force && now - lastEmit < 150) return;
-    lastEmit = now;
-    const loaded = [...loadedBy.values()].reduce((a, b) => a + b, 0);
-    const elapsed = (now - t0) / 1000;
-    const speed = elapsed > 0.3 ? loaded / elapsed : 0;
-    const allSent = loaded >= total;
-    onProgress?.(Math.min(100, (loaded / total) * 100), {
-      percent: Math.min(100, (loaded / total) * 100),
-      loaded,
-      total,
-      done,
-      count: files.length,
-      current: [...active].map((i) => files[i].name),
-      speed,
-      eta: speed > 0 && !allSent ? (total - loaded) / speed : null,
-      phase: allSent ? 'processing' : 'upload',
-    });
-  };
-
-  const worker = async () => {
-    while (next < files.length) {
-      const i = next++;
-      const file = files[i];
-      active.add(i);
-      emit(true);
-      try {
-        const res = await uploadMedia([file], (pct) => {
-          loadedBy.set(i, (file.size * pct) / 100);
-          emit();
-        });
-        media.push(...res.media);
-        errors.push(...(res.errors || []));
-        if (res.media.length) onEach?.(res.media);
-      } catch (err: any) {
-        errors.push(...(err?.errors || [{ name: file.name, error: err?.message || 'Échec de l’envoi' }]));
-      }
-      loadedBy.set(i, file.size);
-      active.delete(i);
-      done += 1;
-      emit(true);
+export function uploadMany(files: File[], onProgress?: (percent: number, info: UploadInfo) => void, onEach?: (media: Media[]) => void): Promise<UploadResult> {
+  if (files.length === 0) return Promise.resolve({ media: [], errors: [] });
+  return new Promise((resolve) => {
+    const batch: Batch = { onProgress, onEach, result: { media: [], errors: [] }, remaining: files.length, resolve };
+    batches.add(batch);
+    if (!session) session = { entries: [], t0: performance.now(), done: 0 };
+    for (const file of files) {
+      const entry: Entry = { file, loaded: 0, active: false, batch };
+      session.entries.push(entry);
+      pending.push(entry);
     }
-  };
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker));
-  return { media, errors };
+    emit(true);
+    pump();
+  });
 }
 
 const MB = 1024 * 1024;

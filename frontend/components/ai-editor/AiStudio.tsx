@@ -5,8 +5,7 @@ import { useRouter } from 'next/navigation';
 import { ChevronLeft, Share, Clapperboard, Bot, Images, SlidersHorizontal, Music, Type, Captions, UploadCloud, Loader2, Palette } from 'lucide-react';
 import { EditorProviders, SaveIndicator, useAutosave } from '@/components/editor/Editor';
 import PreviewCanvas from '@/components/editor/PreviewCanvas';
-import Timeline from '@/components/editor/Timeline';
-import Toolbar from '@/components/editor/Toolbar';
+import ResizableTimeline from '@/components/editor/ResizableTimeline';
 import ExportDialog from '@/components/editor/ExportDialog';
 import AIPanel from '@/components/editor/panels/AIPanel';
 import Inspector from '@/components/editor/Inspector';
@@ -105,6 +104,7 @@ function StudioLayout({ doc, initialPrompt, initialMedia }: { doc: EditorProject
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState<number | null>(null);
   const [uploadInfo, setUploadInfo] = useState<UploadInfo | null>(null);
+  const activeBatches = useRef(0);
   const dragDepth = useRef(0);
   const saveState = useAutosave(doc.id, name);
   const clipCount = useEditor((s) => s.project.clips.length);
@@ -117,9 +117,13 @@ function StudioLayout({ doc, initialPrompt, initialMedia }: { doc: EditorProject
 
   /** Import de fichiers déposés / collés : ajoutés à la médiathèque et sélectionnés pour l'IA. */
   const importFiles = async (files: File[]) => {
-    if (files.length === 0 || uploading !== null) return;
-    setUploading(0);
-    setUploadInfo(null);
+    if (files.length === 0) return;
+    // Pendant un envoi, les nouveaux fichiers rejoignent la file en cours.
+    activeBatches.current += 1;
+    if (activeBatches.current === 1) {
+      setUploading(0);
+      setUploadInfo(null);
+    }
     setTab('media');
     try {
       const { media, errors } = await uploadMany(
@@ -137,8 +141,11 @@ function StudioLayout({ doc, initialPrompt, initialMedia }: { doc: EditorProject
       errors.slice(0, 5).forEach((e) => showToast({ type: 'error', message: `${e.name} : ${e.error}` }));
       if (media.length) showToast({ type: 'success', message: `${media.length} fichier(s) importé(s) et sélectionné(s) pour l'IA.` });
     } finally {
-      setUploading(null);
-      setUploadInfo(null);
+      activeBatches.current -= 1;
+      if (activeBatches.current === 0) {
+        setUploading(null);
+        setUploadInfo(null);
+      }
     }
   };
   const importRef = useRef(importFiles);
@@ -252,12 +259,7 @@ function StudioLayout({ doc, initialPrompt, initialMedia }: { doc: EditorProject
       </div>
 
       {/* Timeline avec ses outils : supprimer, couper, dupliquer, annuler… les clips placés par l'IA. */}
-      <div className="h-[250px] border-t border-white/5 flex flex-col">
-        <Toolbar timelineWidth={1200} />
-        <div className="flex-1 min-h-0">
-          <Timeline />
-        </div>
-      </div>
+      <ResizableTimeline defaultHeight={250} />
 
       {dragging && (
         <div className="pointer-events-none absolute inset-0 z-[110] bg-fuchsia-500/10 border-4 border-dashed border-fuchsia-400 rounded-xl flex flex-col items-center justify-center gap-2">

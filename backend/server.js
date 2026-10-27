@@ -20,6 +20,7 @@ const db = require('./services/db');
 const captionEngine = require('../shared/captionEngine');
 const composerRoutes = require('./routes/composer');
 const mediaRoutes = require('./routes/media');
+const ttsRoutes = require('./routes/tts');
 const captionsRoutes = require('./routes/captions');
 const editorRoutes = require('./routes/editor');
 const aiRoutes = require('./routes/ai');
@@ -61,6 +62,7 @@ app.use('/fonts', express.static(FONTS_DIR, { maxAge: '30d' }));
 
 app.use('/api/composer', composerRoutes);
 app.use('/api/media', mediaRoutes);
+app.use('/api/tts', ttsRoutes);
 app.use('/api/captions', captionsRoutes);
 app.use('/api/editor', editorRoutes);
 app.use('/api/ai', aiRoutes);
@@ -518,15 +520,26 @@ async function bootstrap() {
   const server = app.listen(PORT, () => {
     console.log(`ClipTok backend démarré sur http://localhost:${PORT}`);
     console.log(`[storage] Médias : ${media.MEDIA_DIR} | Clips : ${media.OUTPUT_DIR} | Temp : ${media.TEMP_DIR}`);
+    console.log(`[bibliothèque] Musiques : ${media.LIBRARY.music} | SFX : ${media.LIBRARY.sfx} | Voix : ${media.LIBRARY.voice}`);
   });
 
   // Le pipeline complet (download + Whisper + LLM + ffmpeg) peut prendre plusieurs minutes.
+  // requestTimeout (5 min par défaut sous Node 18+) coupait les longues demandes à l'IA : « Failed to fetch ».
   server.timeout = 20 * 60 * 1000;
+  server.requestTimeout = 20 * 60 * 1000;
+  server.headersTimeout = 2 * 60 * 1000;
+  server.keepAliveTimeout = 65 * 1000;
 
   // Tâches de fond : détection de l'encodeur et génération des effets sonores manquants.
   detectEncoder().then((enc) => console.log(`[ffmpeg] Encodeur vidéo : ${enc}`));
   ensureSfx().then((list) => console.log(`[sfx] ${list.length} effets sonores disponibles.`)).catch((err) => console.warn('[sfx]', err.message));
+  media.scanLibrary(true).then((n) => n && console.log(`[bibliothèque] ${n} son(s) ajouté(s) depuis le disque.`)).catch((err) => console.warn('[bibliothèque]', err.message));
 }
+
+// Une promesse rejetée oubliée (fournisseur d'IA, ffmpeg…) ne doit pas tuer le serveur :
+// sinon nodemon attend une modification de fichier et toutes les requêtes échouent (« Failed to fetch »).
+process.on('unhandledRejection', (err) => console.error('[server] Promesse rejetée non gérée :', err));
+process.on('uncaughtException', (err) => console.error('[server] Exception non gérée :', err));
 
 bootstrap().catch((err) => {
   console.error('Échec du démarrage du serveur :', err);

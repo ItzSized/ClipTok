@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# Chemin local du projet, écrit au moment de créer l'installeur.
+app-config.json

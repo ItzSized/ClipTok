@@ -11,6 +11,7 @@ import { useToast } from '@/components/ToastProvider';
 import { describeUpload, dragHasFiles, filesFromDrop, filesFromPaste, uploadMany, type UploadInfo } from '@/lib/mediaFiles';
 import { getJSON, setJSON } from '@/lib/storage';
 import { AiModelPicker, useAiPrefs } from './AiModelPicker';
+import { VoicePicker, useVoicePrefs } from '@/components/media/VoiceOver';
 import { BulkMediaBar, MediaPreview, MediaTile, SortSelect, sortMedia, useMediaRemover, type SortMode } from './MediaLibrary';
 
 const CREATE_PREFS_KEY = 'cliptok:ai-create-prefs';
@@ -30,6 +31,8 @@ export default function AiCreateCard() {
   const [theme, setTheme] = useState('');
   const [prefsLoaded, setPrefsLoaded] = useState(false);
   const ai = useAiPrefs();
+  const [voicePrefs, setVoicePrefs] = useVoicePrefs();
+  const [withVoice, setWithVoice] = useState(false);
   const [media, setMedia] = useState<Media[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [creating, setCreating] = useState(false);
@@ -54,13 +57,18 @@ export default function AiCreateCard() {
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState<number | null>(null);
   const [uploadInfo, setUploadInfo] = useState<UploadInfo | null>(null);
+  const activeBatches = useRef(0);
   const dragDepth = useRef(0);
 
   /** Fichiers déposés n'importe où sur la carte ou collés : importés et sélectionnés pour l'IA. */
   const importFiles = async (files: File[]) => {
     if (files.length === 0) return;
-    setUploading(0);
-    setUploadInfo(null);
+    // Pendant un envoi, les nouveaux fichiers rejoignent la file en cours.
+    activeBatches.current += 1;
+    if (activeBatches.current === 1) {
+      setUploading(0);
+      setUploadInfo(null);
+    }
     try {
       const { media: added, errors } = await uploadMany(
         files,
@@ -77,8 +85,11 @@ export default function AiCreateCard() {
       errors.slice(0, 5).forEach((err) => showToast({ type: 'error', message: `${err.name} : ${err.error}` }));
       if (added.length) showToast({ type: 'success', message: `${added.length} fichier(s) importé(s) et sélectionné(s).` });
     } finally {
-      setUploading(null);
-      setUploadInfo(null);
+      activeBatches.current -= 1;
+      if (activeBatches.current === 0) {
+        setUploading(null);
+        setUploadInfo(null);
+      }
     }
   };
   const importRef = useRef(importFiles);
@@ -113,7 +124,8 @@ export default function AiCreateCard() {
     try {
       const doc = await createEditorProject({ name: prompt.trim().slice(0, 60), aspect });
       const chosen = core.THEMES.find((t) => t.id === theme);
-      const request = chosen ? `${prompt.trim()}\n\nThème : ${chosen.name} (action "theme" "${chosen.id}").` : prompt.trim();
+      let request = chosen ? `${prompt.trim()}\n\nThème : ${chosen.name} (action "theme" "${chosen.id}").` : prompt.trim();
+      if (withVoice) request += `\n\nVoix off : écris un script parlé accrocheur adapté aux clips et ajoute-le avec l'action "voiceover" (voix "${voicePrefs.voice}"), puis des sous-titres.`;
       const params = new URLSearchParams({ ai: request });
       if (selected.length) params.set('media', selected.join(','));
       router.push(`/ai-editor/${doc.id}?${params.toString()}`);
@@ -260,6 +272,18 @@ export default function AiCreateCard() {
               </button>
             ))}
           </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-semibold text-zinc-400">Voix off (mémorisée, gratuite)</span>
+            <label className="flex items-center gap-1.5 text-[11px] text-zinc-300 cursor-pointer">
+              <input type="checkbox" checked={withVoice} onChange={(e) => setWithVoice(e.target.checked)} className="accent-fuchsia-500" />
+              L'IA écrit et ajoute une voix off
+            </label>
+          </div>
+          <p className="text-[11px] text-zinc-600 mb-2">Utilisée aussi quand vous demandez « ajoute une voix off qui dit… » dans l'éditeur. ▶ pour écouter.</p>
+          <VoicePicker value={voicePrefs.voice} onChange={(voice) => setVoicePrefs({ voice })} />
         </div>
 
         <div>

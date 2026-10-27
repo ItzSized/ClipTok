@@ -11,6 +11,7 @@ import { useToast } from '@/components/ToastProvider';
 import { Select, ProgressBar, Field } from '@/components/ui/controls';
 import { cancelJob, mediaThumbnailUrl, absoluteFileUrl } from '@/lib/api';
 import { speechClips, generateTimelineCaptions } from '../timelineSpeech';
+import { PresetCard } from '@/components/captions/CaptionStylePanel';
 
 function Hint({ children }: { children: React.ReactNode }) {
   return <p className="text-[11px] text-zinc-500 leading-relaxed">{children}</p>;
@@ -279,6 +280,11 @@ export function CaptionsPanel() {
   const store = useEditorStore();
   const project = useEditor((s) => s.project);
   const { showToast } = useToast();
+  const [, setFontsReady] = useState(false);
+  // Les aperçus de styles utilisent les vraies polices.
+  useEffect(() => {
+    ensureAllFonts().then(() => setFontsReady(true)).catch(() => {});
+  }, []);
   const [language, setLanguage] = useState('auto');
   const [translate, setTranslate] = useState(true);
   const [model, setModel] = useState('small');
@@ -349,13 +355,7 @@ export function CaptionsPanel() {
         <Field label="Style">
           <div className="grid grid-cols-2 gap-1.5">
             {captionEngine.PRESETS.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => setPreset(p.id)}
-                className={`px-2 py-2 rounded-lg text-xs font-semibold border ${preset === p.id ? 'border-cyan-500 bg-cyan-500/15 text-white' : 'border-white/10 text-zinc-400 hover:text-white'}`}
-              >
-                {p.name}
-              </button>
+              <PresetCard key={p.id} preset={p} active={preset === p.id} onClick={() => setPreset(p.id)} />
             ))}
           </div>
         </Field>

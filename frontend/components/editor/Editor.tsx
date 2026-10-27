@@ -12,8 +12,7 @@ import type { EditorProjectDoc, RenderResult } from '@/lib/types';
 import LeftPanel, { type LeftTab } from './LeftPanel';
 import PreviewCanvas from './PreviewCanvas';
 import Inspector from './Inspector';
-import Timeline from './Timeline';
-import Toolbar from './Toolbar';
+import ResizableTimeline from './ResizableTimeline';
 import ExportDialog from './ExportDialog';
 
 function isTyping(e: KeyboardEvent) {
@@ -31,8 +30,16 @@ function isTyping(e: KeyboardEvent) {
 function useShortcuts(store: EditorStore, engine: PreviewEngine, mode: 'all' | 'combos' = 'all') {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (isTyping(e)) return;
       const ctrl = e.ctrlKey || e.metaKey;
+      // Ctrl+P : relit toute la vidéo depuis le début, avec tous les sons (même pendant la saisie ; remplace l'impression).
+      if (ctrl && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        engine.pause();
+        engine.seek(0);
+        engine.play();
+        return;
+      }
+      if (isTyping(e)) return;
       if (mode === 'combos' && !ctrl && e.key.length === 1 && e.code !== 'Space') return;
       const fps = store.getState().project.settings.fps || 30;
       const key = e.key.toLowerCase();
@@ -139,22 +146,8 @@ function EditorLayout({ doc }: { doc: EditorProjectDoc }) {
   const [tab, setTab] = useState<LeftTab>('media');
   const [showExport, setShowExport] = useState(false);
   const [lastExport, setLastExport] = useState<RenderResult | null>(doc.lastExport);
-  const [timelineH, setTimelineH] = useState(300);
   const project = useEditor((s) => s.project);
   const saveState = useAutosave(doc.id, name);
-  const timelineWrap = useRef<HTMLDivElement>(null);
-  const [timelineWidth, setTimelineWidth] = useState(1200);
-
-  useEffect(() => {
-    const el = timelineWrap.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => setTimelineWidth(el.clientWidth));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  // Poignée de redimensionnement entre l'aperçu et la timeline.
-  const resizing = useRef<{ y: number; h: number } | null>(null);
 
   return (
     <div className="relative z-10 flex flex-col h-[calc(100vh-73px)] w-full bg-[#141417] text-zinc-100">
@@ -201,24 +194,8 @@ function EditorLayout({ doc }: { doc: EditorProjectDoc }) {
         </aside>
       </div>
 
-      <div
-        className="h-1.5 cursor-row-resize bg-white/5 hover:bg-cyan-500/50 transition-colors"
-        onPointerDown={(e) => {
-          resizing.current = { y: e.clientY, h: timelineH };
-          (e.target as HTMLElement).setPointerCapture(e.pointerId);
-        }}
-        onPointerMove={(e) => {
-          if (!resizing.current) return;
-          setTimelineH(Math.min(window.innerHeight * 0.7, Math.max(160, resizing.current.h - (e.clientY - resizing.current.y))));
-        }}
-        onPointerUp={() => (resizing.current = null)}
-      />
-      <div ref={timelineWrap} className="flex flex-col" style={{ height: timelineH }}>
-        <Toolbar timelineWidth={timelineWidth} />
-        <div className="flex-1 min-h-0">
-          <Timeline />
-        </div>
-      </div>
+      <ResizableTimeline />
+
 
       {showExport && <ExportDialog defaultName={name} projectId={doc.id} initial={lastExport} onClose={() => setShowExport(false)} onDone={setLastExport} />}
     </div>

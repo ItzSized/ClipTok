@@ -273,7 +273,9 @@ export class EditorStore {
     const kind = m.kind || 'audio';
     const mediaLike = { id: m.id, kind, url: m.url, duration: m.duration, width: m.width, height: m.height, hasAudio: m.hasAudio !== false, name: m.name };
     const time = at ?? this.getTime();
-    const isShortSfx = kind === 'audio' && (mediaLike.url.startsWith('/sfx/') || (mediaLike.duration > 0 && mediaLike.duration <= 8));
+    // Voix off et musiques de la bibliothèque : piste audio, même courtes ; sons courts : piste SFX.
+    const isShortSfx =
+      kind === 'audio' && (mediaLike.url.startsWith('/sfx/') || m.library === 'sfx' || (!m.library && m.source !== 'tts' && mediaLike.duration > 0 && mediaLike.duration <= 8));
     let clipId = '';
     this.update((p) => {
       let track: Track | undefined = trackId ? p.tracks.find((t) => t.id === trackId) : undefined;

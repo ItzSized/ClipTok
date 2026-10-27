@@ -34,6 +34,7 @@ import { addAiMemory, aiEdit, deleteAiMemory, describeMedia, getAiMemory, getSfx
 import { AiModelPicker, useAiPrefs } from '@/components/ai-editor/AiModelPicker';
 import AiUsagePanel from '@/components/ai-editor/AiUsagePanel';
 import { getJSON, setJSON } from '@/lib/storage';
+import { loadSnapshots, saveSnapshots } from '@/lib/aiSnapshots';
 import { describeUpload, uploadMany, type UploadInfo } from '@/lib/mediaFiles';
 import type { Media, SfxItem } from '@/lib/types';
 
@@ -110,6 +111,7 @@ export default function AIPanel({
   const [attached, setAttached] = useState<Media[]>([]);
   const [uploadInfo, setUploadInfo] = useState<UploadInfo | null>(null);
   const [uploadingFiles, setUploadingFiles] = useState(false);
+  const uploadBatches = useRef(0);
   const fileRef = useRef<HTMLInputElement>(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -122,8 +124,33 @@ export default function AIPanel({
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const autoSent = useRef(false);
-  // États du projet avant chaque réponse (pour « Annuler ») : gardés en mémoire seulement (trop lourds à stocker).
+  // États du projet avant chaque réponse (pour « Annuler » et « reviens en arrière »), conservés dans IndexedDB.
   const snapshots = useRef(new Map<string, EditorProject>());
+  useEffect(() => {
+    loadSnapshots(projectId).then((saved) => {
+      snapshots.current = new Map([...saved, ...snapshots.current]);
+    });
+  }, [projectId]);
+  const persistSnapshots = () => saveSnapshots(projectId, snapshots.current);
+
+  /**
+   * Défait les `steps` dernières réponses de l'IA encore actives de la discussion :
+   * le projet reprend l'état d'avant la plus ancienne d'entre elles.
+   */
+  const revertTurns = (sessionId: string, list: ChatMessage[], steps: number) => {
+    const targets = [...list].reverse().filter((m) => m.role === 'assistant' && !m.undone && snapshots.current.has(m.id)).slice(0, Math.max(1, steps));
+    if (targets.length === 0) return 0;
+    const oldest = targets[targets.length - 1];
+    const snapshot = snapshots.current.get(oldest.id)!;
+    store.update((p) => {
+      Object.assign(p, JSON.parse(JSON.stringify(snapshot)));
+    });
+    const ids = new Set(targets.map((m) => m.id));
+    for (const id of ids) snapshots.current.delete(id);
+    persistSnapshots();
+    setSessions((all) => all.map((s) => (s.id !== sessionId ? s : { ...s, messages: s.messages.map((m) => (ids.has(m.id) ? { ...m, undone: true } : m)) })));
+    return targets.length;
+  };
 
   const current = sessions.find((s) => s.id === currentId) || null;
   const messages = current?.messages || [];
@@ -195,7 +222,26 @@ export default function AIPanel({
     setInput('');
     setAttached([]);
     setView('chat');
-    const history = fresh ? [] : messages.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content }));
+    // L'IA doit savoir ce qu'elle a VRAIMENT fait (et ce qui a échoué / été annulé) pour suivre la conversation.
+    const history = fresh
+      ? []
+      : messages
+          .filter((m) => !m.error)
+          .map((m) => {
+            if (m.role === 'user') return { role: m.role, content: m.content };
+            const parts = [m.content];
+            if (m.done?.length) parts.push(`[Actions appliquées : ${m.done.slice(0, 15).join(' ; ')}]`);
+            if (m.warnings?.length) parts.push(`[Échecs : ${m.warnings.slice(0, 8).join(' ; ')}]`);
+            if (m.undone) parts.push("[L'utilisateur a ANNULÉ ces modifications]");
+            // Les résultats de recherche restent connus aux messages suivants (« ajoute ce que tu as trouvé »).
+            if (m.searches?.length)
+              parts.push(`[Recherches web : ${m.searches.map((sr) => `« ${sr.query} » → ${sr.sources.slice(0, 3).map((src) => `${src.title} (${src.url})`).join(', ')}`).join(' ; ')}]`);
+            return { role: m.role, content: parts.join('\n') };
+          });
+    // Mode automatique : on garde l'IA (fournisseur + modèle) qui a répondu au message précédent.
+    const lastAnswer = fresh ? undefined : [...messages].reverse().find((m) => m.role === 'assistant' && !m.error && m.provider);
+    const [stickyProvider, stickyModel] = (lastAnswer?.provider || '').split(' · ');
+    const sticky = stickyProvider && stickyModel ? { provider: stickyProvider, model: stickyModel } : undefined;
     const sessionId = push(fresh ? null : currentId, { id: newId(), role: 'user', content: typed || 'Voici des fichiers.', files: files.map((f) => f.name), at: Date.now() });
     setCurrentId(sessionId);
     setBusy(true);
@@ -227,7 +273,7 @@ export default function AIPanel({
         })
         .join(', ');
       const request = files.length ? `${typed || 'Voici des fichiers.'}\n\n(Fichiers joints à ce message : ${attachedDesc})` : typed;
-      const res = await aiEdit({ request, history, context, ...ai.request, webSearch }, controller.signal);
+      const res = await aiEdit({ request, history, context, ...ai.request, webSearch, sticky }, controller.signal);
       // Mémoire : souvenirs demandés par l'IA (médias en alias « m3 » → vrais médias).
       const remembered: string[] = [];
       for (const r of res.remember || []) {
@@ -251,10 +297,21 @@ export default function AIPanel({
       }
       if (remembered.length || forgotten) getAiMemory().then(setMemory).catch(() => { });
       const snapshot = JSON.parse(JSON.stringify(store.getState().project)) as EditorProject;
-      setStatus(res.actions.length ? `Application de ${res.actions.length} action(s)…` : '');
-      const result = await applyAiActions(store, engine, res.actions, aliases, sfx, (msg) => setStatus(msg), ai.request);
+      // « Reviens en arrière » : on restaure d'abord l'état d'avant les réponses à défaire.
+      const undoAction = res.actions.find((a) => a.type === 'undo');
+      const actions = res.actions.filter((a) => a.type !== 'undo');
+      const reverted = undoAction ? revertTurns(sessionId, messages, Number(undoAction.steps) || 1) : 0;
+      setStatus(actions.length ? `Application de ${actions.length} action(s)…` : '');
+      const result = await applyAiActions(store, engine, actions, aliases, sfx, (msg) => setStatus(msg), ai.request);
+      if (undoAction) {
+        if (reverted) result.done.unshift(`Retour en arrière : ${reverted} réponse(s) annulée(s)`);
+        else result.warnings.push('Retour en arrière impossible : aucune modification précédente à annuler dans cette discussion (utilisez Ctrl+Z).');
+      }
       const id = newId();
-      if (result.done.length) snapshots.current.set(id, snapshot);
+      if (result.done.length) {
+        snapshots.current.set(id, snapshot);
+        persistSnapshots();
+      }
       push(sessionId, {
         id,
         role: 'assistant',
@@ -292,6 +349,7 @@ export default function AIPanel({
       Object.assign(p, JSON.parse(JSON.stringify(snapshot)));
     });
     snapshots.current.delete(msgId);
+    persistSnapshots();
     setSessions((list) => list.map((s) => (s.id !== currentId ? s : { ...s, messages: s.messages.map((m) => (m.id === msgId ? { ...m, undone: true } : m)) })));
   };
 
@@ -610,6 +668,8 @@ export default function AIPanel({
               const files = Array.from(e.target.files || []);
               e.target.value = '';
               if (!files.length) return;
+              // Pendant un envoi, les nouveaux fichiers rejoignent la file en cours.
+              uploadBatches.current += 1;
               setUploadingFiles(true);
               try {
                 await uploadMany(files, (_, info) => setUploadInfo(info), (ready) => {
@@ -617,9 +677,12 @@ export default function AIPanel({
                   onFilesAdded?.(ready);
                 });
               } finally {
-                setUploadingFiles(false);
-                setUploadInfo(null);
-                inputRef.current?.focus();
+                uploadBatches.current -= 1;
+                if (uploadBatches.current === 0) {
+                  setUploadingFiles(false);
+                  setUploadInfo(null);
+                  inputRef.current?.focus();
+                }
               }
             }}
           />

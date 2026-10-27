@@ -180,4 +180,4 @@ async function downloadVideo(youtubeUrl, jobDir, quality = '1080p', onProgress, 
   }
 }
 
-module.exports = { downloadVideo, extractAudio, getVideoMetadata };
+module.exports = { downloadVideo, extractAudio, getVideoMetadata, runYtDlpWithAuth };
