@@ -31,3 +31,6 @@ backend/cookies.txt
 backend/*.mp4
 backend/*.part
 backend/scripts/__pycache__/
+
+# Installeur et .exe de l application Windows (générés par npm run app:build)
+\!_EXE_ET_INSTALLEUR/

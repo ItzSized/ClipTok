@@ -8,7 +8,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "node scripts/write-config.js && electron-builder --win nsis"
+    "dist": "node scripts/write-config.js && electron-builder --win nsis portable && node scripts/copy-output.js"
   },
   "build": {
     "appId": "com.itzsized.cliptok",
@@ -28,7 +28,10 @@
       "build/icon-32.png"
     ],
     "win": {
-      "target": "nsis",
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "build/icon.png"
     },
     "nsis": {
